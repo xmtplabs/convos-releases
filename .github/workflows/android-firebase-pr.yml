@@ -1,0 +1,113 @@
+# Reusable: build convos-client devRelease APK and upload to Firebase App
+# Distribution. Runs `nix develop ./` on the CALLER's checkout — the caller's
+# flake.lock pins the convos-releases fastlane package + lanes, so this file
+# only pins step orchestration.
+#
+# Caller passes secrets via `secrets: inherit` (same org).
+name: Android Firebase PR (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the build job
+        type: string
+        default: ubuntu-latest
+      project-dir:
+        description: Directory containing the gradle root (and fastlane/ stub)
+        type: string
+        default: android
+      firebase-app-id:
+        description: "Firebase Android app id (1:NNN:android:HEX)"
+        type: string
+        required: true
+      tester-groups:
+        description: Comma-separated Firebase tester group aliases
+        type: string
+        default: xmtp-internal
+      pr-number:
+        type: string
+        default: ''
+      pr-title:
+        type: string
+        default: ''
+    secrets:
+      DEV_KEYSTORE_BASE64:
+        required: true
+      DEV_KEYSTORE_PASSWORD:
+        required: true
+      DEV_KEY_ALIAS:
+        required: true
+      DEV_KEY_PASSWORD:
+        required: true
+      FIREBASE_SERVICE_ACCOUNT_JSON:
+        description: Base64-encoded service account JSON
+        required: true
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: Build & upload to Firebase App Distribution
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Enter dev shell
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: "--accept-flake-config"
+
+      - name: Decode dev keystore + Firebase service account
+        env:
+          DEV_KEYSTORE_BASE64: ${{ secrets.DEV_KEYSTORE_BASE64 }}
+          FIREBASE_SA_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$DEV_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dev-upload.jks"
+          echo "$FIREBASE_SA_BASE64" | base64 -d > "$RUNNER_TEMP/firebase-sa.json"
+
+      - name: Run fastlane android pr_adhoc
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          # Absolute path: gradle's file() resolves relative paths against
+          # the app module dir, not the gradle root.
+          DEV_KEYSTORE_PATH: ${{ runner.temp }}/dev-upload.jks
+          DEV_KEYSTORE_PASSWORD: ${{ secrets.DEV_KEYSTORE_PASSWORD }}
+          DEV_KEY_ALIAS: ${{ secrets.DEV_KEY_ALIAS }}
+          DEV_KEY_PASSWORD: ${{ secrets.DEV_KEY_PASSWORD }}
+          FIREBASE_APP_ID_ANDROID_DEV: ${{ inputs.firebase-app-id }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ runner.temp }}/firebase-sa.json
+          FIREBASE_TESTER_GROUPS: ${{ inputs.tester-groups }}
+          GITHUB_PR_NUMBER: ${{ inputs.pr-number }}
+          GITHUB_PR_TITLE: ${{ inputs.pr-title }}
+        run: fastlane android pr_adhoc
+
+      - name: Clean up decoded secrets
+        if: always()
+        run: rm -f "$RUNNER_TEMP/dev-upload.jks" "$RUNNER_TEMP/firebase-sa.json"
+
+      - name: Upload APK artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: convos-android-pr-${{ inputs.pr-number || github.run_id }}
+          path: ${{ inputs.project-dir }}/app/build/outputs/apk/dev/release/*.apk
+          if-no-files-found: warn
+          retention-days: 14
