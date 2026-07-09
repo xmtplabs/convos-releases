@@ -27,6 +27,14 @@ OUTPUT_NAME      = "Convos-PR.ipa"
 # work: nix (imported from the CONVOS_LANES store path) and non-nix
 # (fetched by import_from_git into fastlane's clone dir).
 lanes_dir = File.dirname(__FILE__)
+
+# import_from_git sparse-checks-out only this file (plus an actions dir);
+# materialize the sibling lane files when they're missing. No-op on the nix
+# path, where the whole lanes dir is already present.
+unless File.exist?(File.join(lanes_dir, "helpers.rb"))
+  Dir.chdir(lanes_dir) { system("git", "checkout", "HEAD", "--", ".") } ||
+    UI.user_error!("Failed to fetch sibling lane files in #{lanes_dir}")
+end
 import "#{lanes_dir}/helpers.rb"
 import "#{lanes_dir}/match.rb"
 import "#{lanes_dir}/firebase.rb"
