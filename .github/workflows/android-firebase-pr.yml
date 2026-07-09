@@ -83,7 +83,14 @@ jobs:
         # the files, the shell does not echo commands, and Actions masks
         # registered secret values anyway. printf avoids echo's escape
         # processing on the base64 text.
+        #
+        # Fail loudly on missing secrets: with `secrets: inherit` GitHub does
+        # not enforce this workflow's `required: true` declarations, and an
+        # empty var would otherwise produce a zero-byte keystore that fails
+        # minutes later with a cryptic gradle signing error.
         run: |
+          [ -n "$DEV_KEYSTORE_BASE64" ] || { echo "::error::DEV_KEYSTORE_BASE64 secret is missing"; exit 1; }
+          [ -n "$FIREBASE_SA_BASE64" ] || { echo "::error::FIREBASE_SERVICE_ACCOUNT_JSON secret is missing"; exit 1; }
           printf '%s' "$DEV_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dev-upload.jks"
           printf '%s' "$FIREBASE_SA_BASE64" | base64 -d > "$RUNNER_TEMP/firebase-sa.json"
 
