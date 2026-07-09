@@ -23,7 +23,10 @@ MATCH_GIT_URL    = ENV["MATCH_GIT_URL"] || "git@github.com:xmtplabs/convos-certi
 OUTPUT_DIR       = "build"
 OUTPUT_NAME      = "Convos-PR.ipa"
 
-lanes_dir = ENV.fetch("CONVOS_LANES")
+# Resolve sibling lane files relative to this file so both consumer paths
+# work: nix (imported from the CONVOS_LANES store path) and non-nix
+# (fetched by import_from_git into fastlane's clone dir).
+lanes_dir = File.dirname(__FILE__)
 import "#{lanes_dir}/helpers.rb"
 import "#{lanes_dir}/match.rb"
 import "#{lanes_dir}/firebase.rb"
