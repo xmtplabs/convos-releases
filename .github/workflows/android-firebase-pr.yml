@@ -79,9 +79,13 @@ jobs:
         env:
           DEV_KEYSTORE_BASE64: ${{ secrets.DEV_KEYSTORE_BASE64 }}
           FIREBASE_SA_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        # Secret values never reach the job log: stdout is redirected into
+        # the files, the shell does not echo commands, and Actions masks
+        # registered secret values anyway. printf avoids echo's escape
+        # processing on the base64 text.
         run: |
-          echo "$DEV_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dev-upload.jks"
-          echo "$FIREBASE_SA_BASE64" | base64 -d > "$RUNNER_TEMP/firebase-sa.json"
+          printf '%s' "$DEV_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dev-upload.jks"
+          printf '%s' "$FIREBASE_SA_BASE64" | base64 -d > "$RUNNER_TEMP/firebase-sa.json"
 
       - name: Run fastlane android pr_adhoc
         working-directory: ${{ inputs.project-dir }}

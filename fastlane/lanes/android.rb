@@ -1,16 +1,14 @@
 # Entry point for convos-client (android). Imported by that repo's stub
-# Fastfile (android/fastlane/Fastfile):
-#   import "#{ENV.fetch('CONVOS_LANES')}/android.rb"
-# fastlane executes lanes with cwd = the directory containing fastlane/,
-# i.e. the android/ gradle root, so gradlew + output paths are relative
-# to android/.
+# Fastfile (android/fastlane/Fastfile).
 platform :android do
   desc "Build devRelease APK and upload to Firebase App Distribution"
   lane :pr_adhoc do
     gradle(task: "assembleDevRelease")
 
-    apk = Dir.glob("app/build/outputs/apk/dev/release/*.apk").first
-    UI.user_error!("No devRelease APK found under app/build/outputs/apk/dev/release") unless apk
+    # The gradle action publishes the built APK's absolute path; don't glob
+    # relative paths — the lane's cwd is not the gradle root.
+    apk = lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+    UI.user_error!("gradle reported no devRelease APK output") if apk.to_s.empty? || !File.exist?(apk)
 
     firebase_app_distribution(
       app: ENV.fetch("FIREBASE_APP_ID_ANDROID_DEV"),
