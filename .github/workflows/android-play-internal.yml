@@ -1,0 +1,124 @@
+# Reusable: build convos-client prodRelease AAB and upload to the Play Store
+# internal testing track. Runs `nix develop ./` on the CALLER's checkout —
+# the caller's flake.lock pins the convos-releases fastlane package + lanes,
+# so this file only pins step orchestration.
+#
+# Prod signing + Play credentials come from the CALLER repo's `play-prod`
+# environment (declared on the job below), not from repo-level secrets —
+# PR-triggered workflows can never read them, and the environment's
+# deployment-branch policy restricts runs to dev. Only CACHIX_AUTH_TOKEN
+# arrives via `secrets: inherit`.
+#
+# versionCode is computed by the lane (commit epoch / 60); promotion beyond
+# the internal track is manual in Play Console.
+name: Android Play Internal (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the build job
+        type: string
+        default: ubuntu-latest
+      project-dir:
+        description: Directory containing the gradle root (and fastlane/ stub)
+        type: string
+        default: android
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: Build & upload to Play internal track
+    runs-on: ${{ inputs.runner }}
+    # Serialize Play mutations at the job itself — don't rely on every
+    # caller remembering a concurrency group. Queue, never cancel.
+    concurrency:
+      group: play-internal-${{ github.repository }}
+      cancel-in-progress: false
+    # Resolves the play-prod environment OF THE CALLER REPO: its secrets
+    # and its deployment-branch policy (dev only) apply to this job.
+    environment: play-prod
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Enter dev shell
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: "--accept-flake-config"
+
+      - name: Decode prod keystore + Play service account
+        env:
+          PROD_KEYSTORE_B64: ${{ secrets.PROD_KEYSTORE_BASE64 }}
+          PROD_KEYSTORE_PASSWORD: ${{ secrets.PROD_KEYSTORE_PASSWORD }}
+          PROD_KEY_ALIAS: ${{ secrets.PROD_KEY_ALIAS }}
+          PROD_KEY_PASSWORD: ${{ secrets.PROD_KEY_PASSWORD }}
+          PLAY_SA_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        # Secret values never reach the job log: stdout is redirected into
+        # the files, the shell does not echo commands, and Actions masks
+        # registered secret values anyway. printf avoids echo's escape
+        # processing on the base64 text.
+        #
+        # Guard EVERY secret, not just the decoded ones: these come from the
+        # caller's play-prod environment, and a missing/misplaced secret
+        # (e.g. still repo-level, or a typo'd environment name) yields an
+        # empty value that would otherwise fail minutes later with a cryptic
+        # gradle signing error. An empty PROD_KEY_ALIAS would silently
+        # override gradle's default alias.
+        run: |
+          [ -n "$PROD_KEYSTORE_B64" ] || { echo "::error::PROD_KEYSTORE_BASE64 secret is missing (check the play-prod environment)"; exit 1; }
+          [ -n "$PROD_KEYSTORE_PASSWORD" ] || { echo "::error::PROD_KEYSTORE_PASSWORD secret is missing (check the play-prod environment)"; exit 1; }
+          [ -n "$PROD_KEY_ALIAS" ] || { echo "::error::PROD_KEY_ALIAS secret is missing (check the play-prod environment)"; exit 1; }
+          [ -n "$PROD_KEY_PASSWORD" ] || { echo "::error::PROD_KEY_PASSWORD secret is missing (check the play-prod environment)"; exit 1; }
+          [ -n "$PLAY_SA_B64" ] || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON secret is missing (check the play-prod environment)"; exit 1; }
+          printf '%s' "$PROD_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/prod-upload.jks"
+          printf '%s' "$PLAY_SA_B64" | base64 -d > "$RUNNER_TEMP/play-sa.json"
+
+      - name: Run fastlane android play_internal
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          # Absolute path: gradle's file() resolves relative paths against
+          # the app module dir, not the gradle root.
+          PROD_KEYSTORE_PATH: ${{ runner.temp }}/prod-upload.jks
+          PROD_KEYSTORE_PASSWORD: ${{ secrets.PROD_KEYSTORE_PASSWORD }}
+          PROD_KEY_ALIAS: ${{ secrets.PROD_KEY_ALIAS }}
+          PROD_KEY_PASSWORD: ${{ secrets.PROD_KEY_PASSWORD }}
+          PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play-sa.json
+        run: fastlane android play_internal
+
+      - name: Clean up decoded secrets
+        if: always()
+        run: rm -f "$RUNNER_TEMP/prod-upload.jks" "$RUNNER_TEMP/play-sa.json"
+
+      # Debugging convenience only — the deliverable is the Play release,
+      # which the lane fail-louds on. `warn` covers the no-files case;
+      # continue-on-error covers artifact-service failures. Neither may
+      # fail the job AFTER a successful Play upload — that would poison
+      # the next slot's freshness check into retrying a used versionCode.
+      - name: Upload AAB artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: convos-android-play-internal-${{ github.run_id }}
+          path: ${{ inputs.project-dir }}/app/build/outputs/bundle/prodRelease/*.aab
+          if-no-files-found: warn
+          retention-days: 14
