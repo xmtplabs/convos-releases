@@ -42,4 +42,59 @@ platform :android do
   def first_non_empty_android(*values)
     values.compact.map(&:to_s).map(&:strip).find { |v| !v.empty? }
   end
+
+  desc "Build prodRelease AAB and upload to the Play Store internal testing track"
+  lane :play_internal do
+    require "fileutils"
+
+    # Deterministic, monotonic versionCode: commit timestamp / 60.
+    # Same sha => same code, so an accidental duplicate upload fails loudly
+    # at Play instead of silently shipping twins. ~29.7M today, far under
+    # Play's 2.1B cap and far above the static code in gradle.properties.
+    commit_epoch = `git show -s --format=%ct HEAD`.strip
+    UI.user_error!("could not read HEAD commit timestamp") if commit_epoch.empty?
+    version_code = commit_epoch.to_i / 60
+
+    # Changelog file supply matches to the AAB's versionCode by filename.
+    # Anchor to the fastlane folder, not the cwd — the lane's cwd is not
+    # guaranteed (the APK-glob lesson).
+    metadata_dir = File.join(FastlaneCore::FastlaneFolder.path, "metadata", "android")
+    changelog_dir = File.join(metadata_dir, "en-US", "changelogs")
+    FileUtils.mkdir_p(changelog_dir)
+    # Play rejects release notes over 500 characters — truncate, don't fail
+    # a finished build over a long commit subject.
+    File.write(File.join(changelog_dir, "#{version_code}.txt"),
+               play_internal_release_notes[0, 500])
+
+    gradle(
+      task: "bundleProdRelease",
+      properties: { "VERSION_CODE" => version_code },
+    )
+
+    aab = lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH]
+    UI.user_error!("gradle reported no prodRelease AAB output") if aab.to_s.empty? || !File.exist?(aab)
+
+    upload_to_play_store(
+      package_name: "org.convos.android",
+      track: "internal",
+      release_status: "completed",
+      aab: aab,
+      # _PATH suffix: this is a file path; the GHA secret of the similar
+      # name is base64 content, decoded to a file by the workflow.
+      json_key: ENV.fetch("PLAY_SERVICE_ACCOUNT_JSON_PATH"),
+      metadata_path: metadata_dir,
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
+
+  # Same composition as the iOS testflight_release_notes helper.
+  def play_internal_release_notes
+    sha     = (ENV["GITHUB_SHA"] || `git rev-parse HEAD`.strip).slice(0, 7)
+    subject = `git log -1 --pretty=%s`.strip
+    branch  = ENV["GITHUB_REF_NAME"] || `git rev-parse --abbrev-ref HEAD`.strip
+    "#{subject}\nBranch: #{branch}\nCommit: #{sha}"
+  end
 end
