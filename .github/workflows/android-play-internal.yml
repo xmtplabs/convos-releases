@@ -32,6 +32,11 @@ jobs:
   build:
     name: Build & upload to Play internal track
     runs-on: ${{ inputs.runner }}
+    # Serialize Play mutations at the job itself — don't rely on every
+    # caller remembering a concurrency group. Queue, never cancel.
+    concurrency:
+      group: play-internal-${{ github.repository }}
+      cancel-in-progress: false
     # Resolves the play-prod environment OF THE CALLER REPO: its secrets
     # and its deployment-branch policy (dev only) apply to this job.
     environment: play-prod
@@ -104,11 +109,13 @@ jobs:
         run: rm -f "$RUNNER_TEMP/prod-upload.jks" "$RUNNER_TEMP/play-sa.json"
 
       # Debugging convenience only — the deliverable is the Play release,
-      # which the lane fail-louds on. `warn` (not `error`) so an
-      # artifact-service hiccup can't fail the job AFTER a successful Play
-      # upload and poison the next slot's freshness check.
+      # which the lane fail-louds on. `warn` covers the no-files case;
+      # continue-on-error covers artifact-service failures. Neither may
+      # fail the job AFTER a successful Play upload — that would poison
+      # the next slot's freshness check into retrying a used versionCode.
       - name: Upload AAB artifact
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: convos-android-play-internal-${{ github.run_id }}

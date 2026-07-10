@@ -46,6 +46,17 @@ platform :android do
   desc "Build prodRelease AAB and upload to the Play Store internal testing track"
   lane :play_internal do
     require "fileutils"
+    require "json"
+
+    # Validate the Play credential BEFORE the expensive build: the lane's
+    # contract is a readable service-account JSON file path.
+    sa_path = ENV.fetch("PLAY_SERVICE_ACCOUNT_JSON_PATH")
+    UI.user_error!("Play service account file missing or unreadable: #{sa_path}") unless File.readable?(sa_path)
+    begin
+      JSON.parse(File.read(sa_path))
+    rescue JSON::ParserError => e
+      UI.user_error!("Play service account file is not valid JSON: #{e.message}")
+    end
 
     # Deterministic, monotonic versionCode: commit timestamp / 60.
     # Same sha => same code, so an accidental duplicate upload fails loudly
@@ -54,6 +65,14 @@ platform :android do
     commit_epoch = `git show -s --format=%ct HEAD`.strip
     UI.user_error!("could not read HEAD commit timestamp") if commit_epoch.empty?
     version_code = commit_epoch.to_i / 60
+
+    # Plausibility guard: reject garbage (failed git plumbing) and
+    # future-dated commits — a code above "now" would poison the monotonic
+    # watermark and block every subsequent upload until dev catches up.
+    now_code = Time.now.to_i / 60
+    unless version_code.between?(29_000_000, now_code + 1440)
+      UI.user_error!("versionCode #{version_code} implausible (expected 29,000,000..#{now_code + 1440}); check HEAD commit timestamp")
+    end
 
     # Changelog file supply matches to the AAB's versionCode by filename.
     # Anchor to the fastlane folder, not the cwd — the lane's cwd is not
@@ -81,7 +100,7 @@ platform :android do
       aab: aab,
       # _PATH suffix: this is a file path; the GHA secret of the similar
       # name is base64 content, decoded to a file by the workflow.
-      json_key: ENV.fetch("PLAY_SERVICE_ACCOUNT_JSON_PATH"),
+      json_key: sa_path,
       metadata_path: metadata_dir,
       skip_upload_apk: true,
       skip_upload_metadata: true,
