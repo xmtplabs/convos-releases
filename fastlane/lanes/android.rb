@@ -75,9 +75,11 @@ platform :android do
     end
 
     # Changelog file supply matches to the AAB's versionCode by filename.
-    # Anchor to the fastlane folder, not the cwd — the lane's cwd is not
-    # guaranteed (the APK-glob lesson).
-    metadata_dir = File.join(FastlaneCore::FastlaneFolder.path, "metadata", "android")
+    # Absolute path, resolved once: FastlaneFolder.path can be a memoized
+    # RELATIVE "./" and supply evaluates relative paths under a different
+    # cwd than the lane (run 29269883337 failed exactly this way —
+    # "Could not find folder ./metadata/android"; the APK-glob lesson again).
+    metadata_dir = File.expand_path(File.join(FastlaneCore::FastlaneFolder.path, "metadata", "android"))
     changelog_dir = File.join(metadata_dir, "en-US", "changelogs")
     FileUtils.mkdir_p(changelog_dir)
     # Play rejects release notes over 500 characters — truncate, don't fail
