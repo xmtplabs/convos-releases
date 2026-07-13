@@ -118,4 +118,22 @@ platform :android do
     branch  = ENV["GITHUB_REF_NAME"] || `git rev-parse --abbrev-ref HEAD`.strip
     "#{subject}\nBranch: #{branch}\nCommit: #{sha}"
   end
+
+  desc "Build prodRelease APK and upload to Firebase App Distribution (dev-stream prod builds)"
+  lane :prod_adhoc do
+    gradle(task: "assembleProdRelease")
+
+    apk = lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+    UI.user_error!("gradle reported no prodRelease APK output") if apk.to_s.empty? || !File.exist?(apk)
+
+    firebase_app_distribution(
+      app: ENV.fetch("FIREBASE_APP_ID_ANDROID_PROD"),
+      service_credentials_json_data: ENV["FIREBASE_SERVICE_ACCOUNT_JSON_CONTENT"],
+      service_credentials_file: ENV["FIREBASE_SERVICE_ACCOUNT_JSON"],
+      groups: ENV.fetch("FIREBASE_TESTER_GROUPS", "xmtp-prod-internal"),
+      release_notes: play_internal_release_notes[0, 500],
+      android_artifact_type: "APK",
+      android_artifact_path: apk,
+    )
+  end
 end

@@ -1,0 +1,202 @@
+# Weekly release-branch cut for convos-ios + convos-client.
+# Spec: convos-client docs/superpowers/specs/2026-07-13-release-train-automation-design.md
+#
+# Durable state = releases/<version>/manifest.yml (committed FIRST); every
+# step is ensure-state, so re-dispatching after any failure converges.
+name: Release Cut
+
+on:
+  schedule:
+    # Both correspond to 15:45 America/New_York across DST; the slot
+    # decision step keeps exactly one.
+    - cron: "45 19 * * *"
+    - cron: "45 20 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Bypass day/skip checks
+        type: boolean
+        default: false
+      dry-run:
+        description: Print the plan, mutate nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-train
+  cancel-in-progress: false
+
+env:
+  REPOS: "xmtplabs/convos-ios xmtplabs/convos-client"
+
+jobs:
+  cut:
+    runs-on: warp-ubuntu-latest-x64-8x
+    timeout-minutes: 20
+    permissions:
+      contents: write   # commit manifest/notes to this repo
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Put yq on PATH
+        run: echo "$(nix build nixpkgs#yq-go --no-link --print-out-paths)/bin" >> "$GITHUB_PATH"
+
+      - name: Slot / day / skip decision
+        id: slot
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.force }}" = "true" ]; then
+              echo "go=true" >> "$GITHUB_OUTPUT"; echo "Forced dispatch."; exit 0
+            fi
+          else
+            # Which UTC slot is 15:45 ET today? EDT(-0400)->19:45, EST(-0500)->20:45.
+            offset=$(TZ=America/New_York date +%z)
+            slot="${{ github.event.schedule }}"
+            want="45 20 * * *"; [ "$offset" = "-0400" ] && want="45 19 * * *"
+            if [ "$slot" != "$want" ]; then
+              echo "go=false" >> "$GITHUB_OUTPUT"; echo "Wrong slot for offset $offset."; exit 0
+            fi
+          fi
+          day=$(TZ=America/New_York date +%A | tr '[:upper:]' '[:lower:]')
+          today=$(TZ=America/New_York date +%F)
+          cutday=$(yq '.cut-day' release-config.yml)
+          if [ "$day" != "$cutday" ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"; echo "Not $cutday."; exit 0
+          fi
+          if yq -e ".skip-dates[] | select(. == \"$today\")" release-config.yml >/dev/null 2>&1; then
+            echo "go=false" >> "$GITHUB_OUTPUT"; echo "Skip date $today."; exit 0
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: Mint bot token
+        if: steps.slot.outputs.go == 'true'
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases,convos-ios,convos-client
+
+      - name: Cut
+        if: steps.slot.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          DRY_RUN: ${{ inputs.dry-run || 'false' }}
+        run: |
+          set -euo pipefail
+          today=$(TZ=America/New_York date +%F)
+          work=$(mktemp -d)
+
+          # ---- capture: one SHA per repo, version read AT that SHA ----
+          declare -A SHA VER
+          for repo in $REPOS; do
+            git clone --quiet --filter=blob:none \
+              "https://x-access-token:${GH_TOKEN}@github.com/$repo.git" "$work/${repo##*/}"
+            git -C "$work/${repo##*/}" checkout --quiet origin/dev
+            SHA[$repo]=$(git -C "$work/${repo##*/}" rev-parse HEAD)
+            VER[$repo]=$(./scripts/bump-version.sh read "$work/${repo##*/}")
+            echo "$repo dev=${SHA[$repo]} version=${VER[$repo]}"
+          done
+          first=""; for repo in $REPOS; do
+            [ -z "$first" ] && first="${VER[$repo]}"
+            if [ "${VER[$repo]}" != "$first" ]; then
+              echo "::error::repos disagree on version (${VER[$repo]} vs $first) — resolve stray bump PR first"; exit 1
+            fi
+          done
+          version="$first"
+          IFS=. read -r maj min _ <<< "$version"
+          today_manifest_guard() {
+            # Interrupted-run recovery: if the PREVIOUS minor's train was cut
+            # TODAY and is still status:cut, dev's version may already carry
+            # the post-cut bump — reconcile that train instead of cutting a
+            # phantom next one.
+            local prev="$maj.$((min-1)).0"
+            [ "$min" -gt 0 ] || return 0
+            [ -f "releases/$prev/manifest.yml" ] || return 0
+            local pstat pdate
+            pstat=$(./scripts/manifest.sh get "releases/$prev/manifest.yml" '.status')
+            pdate=$(./scripts/manifest.sh get "releases/$prev/manifest.yml" '."cut-date"')
+            if [ "$pstat" = "cut" ] && [ "$pdate" = "$today" ]; then
+              echo "In-flight train $prev (cut today, still status:cut) — reconciling it instead of cutting $version"
+              version="$prev"
+              IFS=. read -r maj min _ <<< "$version"
+            fi
+          }
+          today_manifest_guard
+          next="$maj.$((min+1)).0"
+          echo "Cutting release/$version; dev moves to $next"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — plan:"
+            for repo in $REPOS; do echo "  $repo: branch release/$version @ ${SHA[$repo]}; bump PR -> $next; release PR -> main"; done
+            echo "  convos-releases: releases/$version/{manifest.yml,ios.md,android.md,submission-notes.md}"
+            exit 0
+          fi
+
+          # ---- once-per-version claim / reconcile mode ----
+          mdir="releases/$version"; mfile="$mdir/manifest.yml"
+          if [ ! -f "$mfile" ]; then
+            mkdir -p "$mdir"
+            args=(); for repo in $REPOS; do args+=("$repo=${SHA[$repo]}"); done
+            ./scripts/manifest.sh init "$mfile" "$version" release "$today" "${args[@]}"
+            last_ios_tag=$(git -C "$work/convos-ios" tag --list 'v*' --sort=-creatordate | head -1 || true)
+            last_cli_tag=$(git -C "$work/convos-client" tag --list 'v*' --sort=-creatordate | head -1 || true)
+            since_ios=""; [ -n "$last_ios_tag" ] && since_ios=$(git -C "$work/convos-ios" log -1 --format=%cs "$last_ios_tag")
+            since_cli=""; [ -n "$last_cli_tag" ] && since_cli=$(git -C "$work/convos-client" log -1 --format=%cs "$last_cli_tag")
+            ./scripts/seed-notes.sh xmtplabs/convos-ios "$since_ios" > "$mdir/ios.md"
+            ./scripts/seed-notes.sh xmtplabs/convos-client "$since_cli" > "$mdir/android.md"
+            { echo "# Submission notes for $version"; echo; echo "_For app reviewers: summarize user-visible changes, test-account hints._"; echo; cat "$mdir/android.md"; } > "$mdir/submission-notes.md"
+            git config user.name "convos-releases-bot"; git config user.email "convos-releases-bot[bot]@users.noreply.github.com"
+            git add "$mdir"; git commit -m "train: cut $version"; git push origin HEAD:main
+          else
+            echo "Manifest exists — reconcile mode."
+            for repo in $REPOS; do
+              SHA[$repo]=$(./scripts/manifest.sh get "$mfile" ".repos.\"$repo\".\"source-sha\"")
+            done
+          fi
+
+          # ---- per-repo ensure steps ----
+          for repo in $REPOS; do
+            dir="$work/${repo##*/}"; sha="${SHA[$repo]}"
+            # a) release branch at recorded sha
+            existing=$(git -C "$dir" ls-remote origin "refs/heads/release/$version" | cut -f1)
+            if [ -z "$existing" ]; then
+              git -C "$dir" push origin "$sha:refs/heads/release/$version"
+              echo "$repo: created release/$version @ $sha"
+            elif [ "$existing" != "$sha" ]; then
+              echo "::error::$repo release/$version exists at $existing, expected $sha"; exit 1
+            else
+              echo "$repo: release/$version already correct"
+            fi
+            # b) dev bump PR (auto-merge)
+            # --state all: in reconcile mode the bump PR may already be MERGED;
+            # recreating it would fail with "no commits between dev and head".
+            if ! gh pr list --repo "$repo" --head "bot/bump-$next" --state all --json number --jq '.[0].number' | grep -q .; then
+              git -C "$dir" checkout --quiet -B "bot/bump-$next" "$sha"
+              ./scripts/bump-version.sh bump "$dir" "$next"
+              git -C "$dir" -c user.name=convos-releases-bot -c user.email="convos-releases-bot[bot]@users.noreply.github.com" \
+                commit -am "chore: bump version to $next after $version cut"
+              git -C "$dir" push -f origin "bot/bump-$next"
+              gh pr create --repo "$repo" --base dev --head "bot/bump-$next" \
+                --title "Bump version to $next" \
+                --body "Automated post-cut bump: release/$version departed; dev now builds $next. Part of the release train."
+              gh pr merge --repo "$repo" "bot/bump-$next" --auto --squash || echo "::warning::auto-merge not enabled on $repo?"
+            else
+              echo "$repo: bump PR exists"
+            fi
+            # c) release PR to main
+            if ! gh pr list --repo "$repo" --head "release/$version" --base main --state open --json number --jq '.[0].number' | grep -q .; then
+              gh pr create --repo "$repo" --base main --head "release/$version" \
+                --title "Release $version" \
+                --body "$(printf 'Weekly release train.\n\n- Notes (edit here): https://github.com/xmtplabs/convos-releases/tree/main/releases/%s\n- Manifest: https://github.com/xmtplabs/convos-releases/blob/main/releases/%s/manifest.yml\n\nEvery push to this branch uploads a fresh RC (TestFlight / Play internal). Merging stages the store submission (Phase 2).' "$version" "$version")"
+            else
+              echo "$repo: release PR exists"
+            fi
+          done

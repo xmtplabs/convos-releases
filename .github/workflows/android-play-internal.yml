@@ -122,3 +122,36 @@ jobs:
           path: ${{ inputs.project-dir }}/app/build/outputs/bundle/prodRelease/*.aab
           if-no-files-found: warn
           retention-days: 14
+
+      # Record this RC in the train manifest (release/hotfix branches only).
+      - name: Record RC in train manifest
+        if: startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')
+        uses: actions/create-github-app-token@v1
+        id: bot
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases
+      - name: Append manifest entry
+        if: startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#*/}"
+          version_code=$(( $(git show -s --format=%ct HEAD) / 60 ))
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          for attempt in 1 2 3; do
+            rm -rf /tmp/train && git clone --quiet --depth 1 \
+              "https://x-access-token:${GH_TOKEN}@github.com/xmtplabs/convos-releases.git" /tmp/train
+            f="/tmp/train/releases/$version/manifest.yml"
+            [ -f "$f" ] || { echo "::error::no manifest for $version — was this branch cut by the train?"; exit 1; }
+            PATH="$(nix build nixpkgs#yq-go --no-link --print-out-paths)/bin:$PATH" \
+              /tmp/train/scripts/manifest.sh append-rc "$f" "${{ github.repository }}" \
+              "${{ github.sha }}" "$run_url" version-code "$version_code"
+            git -C /tmp/train -c user.name=convos-releases-bot -c user.email="convos-releases-bot[bot]@users.noreply.github.com" \
+              commit -am "train: rc ${{ github.repository }}@${GITHUB_SHA:0:7} for $version" || exit 0
+            git -C /tmp/train push origin HEAD:main && break
+            echo "push race, retry $attempt"; sleep $((attempt * 3))
+          done
