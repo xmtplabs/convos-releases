@@ -1015,6 +1015,28 @@
     };
     version = "0.9.3";
   };
+  tzinfo = {
+    dependencies = ["concurrent-ruby"];
+    groups = ["default"];
+    platforms = [];
+    source = {
+      remotes = ["https://rubygems.org"];
+      sha256 = "16w2g84dzaf3z13gxyzlzbf748kylk5bdgg3n1ipvkvvqy685bwd";
+      type = "gem";
+    };
+    version = "2.0.6";
+  };
+  tzinfo-data = {
+    dependencies = ["tzinfo"];
+    groups = ["default"];
+    platforms = [];
+    source = {
+      remotes = ["https://rubygems.org"];
+      sha256 = "1ygpikd3hdqsi16gqh33r5al1b9xdwrv2wl3rw210g7iar9vr3s7";
+      type = "gem";
+    };
+    version = "1.2026.3";
+  };
   uber = {
     groups = ["default"];
     platforms = [];

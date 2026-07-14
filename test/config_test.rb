@@ -9,6 +9,8 @@ class ConfigTest < Minitest::Test
   EDT_THU = Date.new(2026, 7, 16)   # America/New_York: -0400 (EDT), Thursday
   EST_THU = Date.new(2026, 12, 17)  # America/New_York: -0500 (EST), Thursday
   EDT_WRONG_DAY = Date.new(2026, 7, 17) # Friday, EDT
+  SPRING_FORWARD = Date.new(2026, 3, 8)  # DST starts 2am ET; still EDT by 15:45
+  FALL_BACK = Date.new(2026, 11, 1)      # DST ends 2am ET; already EST by 15:45
 
   def setup
     @dir = Dir.mktmpdir("train-config-test-")
@@ -101,6 +103,17 @@ class ConfigTest < Minitest::Test
       force: true, schedule: "45 20 * * *", date: EDT_WRONG_DAY, config: cfg
     )
     assert d.go, d.reason
+  end
+
+  # ---- DST transition days ----
+  def test_spring_forward_sunday_maps_to_edt_slot
+    assert Train::Config.slot_matches?("45 19 * * *", SPRING_FORWARD)
+    refute Train::Config.slot_matches?("45 20 * * *", SPRING_FORWARD)
+  end
+
+  def test_fall_back_sunday_maps_to_est_slot
+    refute Train::Config.slot_matches?("45 19 * * *", FALL_BACK)
+    assert Train::Config.slot_matches?("45 20 * * *", FALL_BACK)
   end
 
   def test_no_schedule_dispatch_without_force_still_checks_day_and_skip
