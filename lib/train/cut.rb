@@ -44,13 +44,15 @@ module Train
       today = date.strftime("%F")
       work = Dir.mktmpdir("train-cut-")
       begin
-        sha, ver = capture_repos(work)
-        version = yield agree_on_version(ver)
+        captures = capture_repos(work)
+        version = yield agree_on_version(captures)
         version = yield reconcile_in_flight(version, today)
 
         maj, min, = version.split(".").map(&:to_i)
         nxt = "#{maj}.#{min + 1}.0"
         @out.puts "Cutting release/#{version}; dev moves to #{nxt}"
+
+        sha = captures.transform_values { |c| c[:sha] }
 
         if @gh.dry_run
           print_dry_run_plan(version, sha)
@@ -97,27 +99,25 @@ module Train
       @gh.set_remote_url(@releases_dir, "https://x-access-token:#{token}@github.com/xmtplabs/convos-releases.git")
     end
 
-    # capture_repos: one SHA per repo, version read AT that SHA.
+    # capture_repos: one SHA + version per repo, version read AT that SHA.
     def capture_repos(work)
-      sha = {}
-      ver = {}
-      REPOS.each do |repo|
+      REPOS.to_h do |repo|
         dir = File.join(work, repo.split("/").last)
         @gh.clone("https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/#{repo}.git", dir, filter: "blob:none")
         @gh.checkout(dir, "origin/dev")
-        sha[repo] = @gh.rev_parse(dir)
-        ver[repo] = Versions.read(dir)
-        @out.puts "#{repo} dev=#{sha[repo]} version=#{ver[repo]}"
+        repo_sha = @gh.rev_parse(dir)
+        repo_ver = Versions.read(dir)
+        @out.puts "#{repo} dev=#{repo_sha} version=#{repo_ver}"
+        [repo, { sha: repo_sha, version: repo_ver }]
       end
-      [sha, ver]
     end
 
-    def agree_on_version(ver)
-      first = ver.values.first
-      ver.each do |_repo, v|
-        next if v == first
+    def agree_on_version(captures)
+      first = captures.values.first[:version]
+      captures.each do |_repo, c|
+        next if c[:version] == first
 
-        return Failure("repos disagree on version (#{v} vs #{first}) — resolve stray bump PR first")
+        return Failure("repos disagree on version (#{c[:version]} vs #{first}) — resolve stray bump PR first")
       end
       Success(first)
     end
@@ -129,10 +129,11 @@ module Train
     # never finished — fail loud rather than silently cutting on top of it.
     def reconcile_in_flight(version, today)
       Dir.glob(File.join(@releases_dir, "releases", "*", "manifest.yml")).sort.each do |mf|
-        next unless Manifest.get(mf, "status") == "cut"
+        data = Manifest.read(mf)
+        next unless data["status"] == "cut"
 
-        mdate = Manifest.get(mf, "cut-date")
-        mver = Manifest.get(mf, "version")
+        mdate = data["cut-date"]
+        mver = data["version"]
         if mdate == today
           @out.puts "In-flight train #{mver} (cut today, still status:cut) — reconciling it instead of cutting #{version}"
           return Success(mver)
@@ -155,7 +156,8 @@ module Train
     def init_or_reconcile_manifest(mfile:, mdir:, version:, today:, sha:, work:)
       if File.exist?(mfile)
         @out.puts "Manifest exists — reconcile mode."
-        recorded = REPOS.to_h { |repo| [repo, Manifest.get(mfile, "repos", repo, "source-sha")] }
+        data = Manifest.read(mfile)
+        recorded = REPOS.to_h { |repo| [repo, data.dig("repos", repo, "source-sha")] }
         return Success(recorded)
       end
 

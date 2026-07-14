@@ -74,6 +74,12 @@ platform :android do
       UI.user_error!("versionCode #{version_code} implausible (expected 29,000,000..#{now_code + 1440}); check HEAD commit timestamp")
     end
 
+    # Surface the chosen versionCode to the workflow (train manifest
+    # recording); no-op outside GitHub Actions.
+    if ENV["GITHUB_OUTPUT"]
+      File.open(ENV["GITHUB_OUTPUT"], "a") { |f| f.puts "version-code=#{version_code}" }
+    end
+
     # Changelog file supply matches to the AAB's versionCode by filename.
     # Absolute path, resolved once: FastlaneFolder.path can be a memoized
     # RELATIVE "./" and supply evaluates relative paths under a different

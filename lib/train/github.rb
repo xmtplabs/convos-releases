@@ -191,14 +191,29 @@ module Train
     # either way to get node_id.
     def pr_merge_auto(repo:, head_or_number:)
       mutate!("enable auto-merge (squash) #{repo}##{head_or_number}", default: true) do
-        pr = resolve_pr(repo, head_or_number)
+        pr = if head_or_number.is_a?(Integer) || head_or_number.to_s.match?(/\A\d+\z/)
+          api! { client.pull_request(repo, head_or_number.to_i) }
+        else
+          owner = repo.split("/").first
+          api! { client.pull_requests(repo, head: "#{owner}:#{head_or_number}", state: "open") }.first
+        end
         unless pr
           @out.puts "train: warning: auto-merge: PR #{repo}##{head_or_number} not found"
           next false
         end
 
         begin
-          response = api! { client.post "/graphql", auto_merge_mutation(pr[:node_id]) }
+          mutation = {
+            query: <<~GQL,
+              mutation($pullRequestId: ID!) {
+                enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: SQUASH }) {
+                  pullRequest { id }
+                }
+              }
+            GQL
+            variables: { pullRequestId: pr[:node_id] }
+          }.to_json
+          response = api! { client.post "/graphql", mutation }
           errors = response[:errors]
           if errors && !errors.empty?
             @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number}: #{errors.map { |e| e[:message] }.join("; ")}"
@@ -214,28 +229,6 @@ module Train
     end
 
     private
-
-    def resolve_pr(repo, head_or_number)
-      if head_or_number.is_a?(Integer) || head_or_number.to_s.match?(/\A\d+\z/)
-        api! { client.pull_request(repo, head_or_number.to_i) }
-      else
-        owner = repo.split("/").first
-        api! { client.pull_requests(repo, head: "#{owner}:#{head_or_number}", state: "open") }.first
-      end
-    end
-
-    def auto_merge_mutation(node_id)
-      {
-        query: <<~GQL,
-          mutation($pullRequestId: ID!) {
-            enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: SQUASH }) {
-              pullRequest { id }
-            }
-          }
-        GQL
-        variables: { pullRequestId: node_id }
-      }.to_json
-    end
 
     def client
       require "octokit"

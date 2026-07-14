@@ -22,7 +22,7 @@ module Train
       data = {
         "version" => version,
         "kind" => kind,
-        "cut-date" => cut_date,
+        "cut-date" => cut_date.to_s,
         "status" => "cut",
         "repos" => {}
       }
@@ -76,10 +76,7 @@ module Train
     # ".repos.\"owner/repo\".\"source-sha\"", etc). Callers pass an array of
     # keys instead of a yq path string — simpler and doesn't need a parser.
     def get(file, *keys)
-      data = read(file)
-      keys.reduce(data) do |node, key|
-        node.nil? ? nil : node[key]
-      end
+      read(file).dig(*keys)
     end
 
     def read(file)

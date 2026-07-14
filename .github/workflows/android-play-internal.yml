@@ -142,9 +142,9 @@ jobs:
         if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          VERSION_CODE: ${{ steps.fastlane.outputs.version-code }}
         run: |
-          version_code=$(( $(git show -s --format=%ct HEAD) / 60 ))
           nix run github:xmtplabs/convos-releases#train -- append-rc \
             --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
             --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --key version-code --value "$version_code"
+            --key version-code --value "${VERSION_CODE:?lane did not publish version-code}"
