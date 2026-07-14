@@ -35,12 +35,21 @@ GEM
     colored2 (3.1.2)
     commander (4.6.0)
       highline (~> 2.0.0)
+    concurrent-ruby (1.3.7)
     csv (3.3.5)
     declarative (0.0.20)
     digest-crc (0.7.0)
       rake (>= 12.0.0, < 14.0.0)
     domain_name (0.6.20240107)
     dotenv (2.8.1)
+    dry-core (1.2.0)
+      concurrent-ruby (~> 1.0)
+      logger
+      zeitwerk (~> 2.6)
+    dry-monads (1.10.0)
+      concurrent-ruby (~> 1.0)
+      dry-core (~> 1.1)
+      zeitwerk (~> 2.6)
     emoji_regex (3.2.3)
     excon (0.112.0)
     faraday (1.10.5)
@@ -191,6 +200,9 @@ GEM
     nanaimo (0.4.0)
     naturally (2.3.0)
     nkf (0.2.0)
+    octokit (10.0.0)
+      faraday (>= 1, < 3)
+      sawyer (~> 0.9)
     optparse (0.8.1)
     os (1.1.4)
     ostruct (0.6.3)
@@ -206,6 +218,9 @@ GEM
     rouge (3.28.0)
     ruby2_keywords (0.0.5)
     rubyzip (2.4.1)
+    sawyer (0.9.3)
+      addressable (>= 2.3.5)
+      faraday (>= 0.17.3, < 3)
     security (0.1.5)
     signet (0.21.0)
       addressable (~> 2.8)
@@ -237,14 +252,18 @@ GEM
       rouge (~> 3.28.0)
     xcpretty-travis-formatter (1.0.1)
       xcpretty (~> 0.2, >= 0.0.7)
+    zeitwerk (2.8.2)
 
 PLATFORMS
   arm64-darwin-25
   ruby
 
 DEPENDENCIES
+  dry-monads (~> 1.6)
   fastlane
   fastlane-plugin-firebase_app_distribution
+  octokit (~> 10.0)
+  retriable (~> 3.1)
 
 CHECKSUMS
   CFPropertyList (3.0.8) sha256=2c99d0d980536d3d7ab252f7bd59ac8be50fbdd1ff487c98c949bb66bb114261
@@ -266,11 +285,14 @@ CHECKSUMS
   colored (1.2) sha256=9d82b47ac589ce7f6cab64b1f194a2009e9fd00c326a5357321f44afab2c1d2c
   colored2 (3.1.2) sha256=b13c2bd7eeae2cf7356a62501d398e72fde78780bd26aec6a979578293c28b4a
   commander (4.6.0) sha256=7d1ddc3fccae60cc906b4131b916107e2ef0108858f485fdda30610c0f2913d9
+  concurrent-ruby (1.3.7) sha256=4412caec3a5ea2e5fdc52076724c071a81f2c0593d83b2ac8cbb8ca63b3151b0
   csv (3.3.5) sha256=6e5134ac3383ef728b7f02725d9872934f523cb40b961479f69cf3afa6c8e73f
   declarative (0.0.20) sha256=8021dd6cb17ab2b61233c56903d3f5a259c5cf43c80ff332d447d395b17d9ff9
   digest-crc (0.7.0) sha256=64adc23a26a241044cbe6732477ca1b3c281d79e2240bcff275a37a5a0d78c07
   domain_name (0.6.20240107) sha256=5f693b2215708476517479bf2b3802e49068ad82167bcd2286f899536a17d933
   dotenv (2.8.1) sha256=c5944793349ae03c432e1780a2ca929d60b88c7d14d52d630db0508c3a8a17d8
+  dry-core (1.2.0) sha256=0cc5a7da88df397f153947eeeae42e876e999c1e30900f3c536fb173854e96a1
+  dry-monads (1.10.0) sha256=68c90d77617c6ce88d60704fc3b233907e6320974152fe75ad947f968006ca39
   emoji_regex (3.2.3) sha256=ecd8be856b7691406c6bf3bb3a5e55d6ed683ffab98b4aa531bb90e1ddcc564b
   excon (0.112.0) sha256=daf9ac3a4c2fc9aa48383a33da77ecb44fa395111e973084d5c52f6f214ae0f0
   faraday (1.10.5) sha256=b144f1d2b045652fa820b5f532723e1643cc28b93dae911d784e5c5f88e8f6ed
@@ -319,6 +341,7 @@ CHECKSUMS
   nanaimo (0.4.0) sha256=faf069551bab17f15169c1f74a1c73c220657e71b6e900919897a10d991d0723
   naturally (2.3.0) sha256=459923cf76c2e6613048301742363200c3c7e4904c324097d54a67401e179e01
   nkf (0.2.0) sha256=fbc151bda025451f627fafdfcb3f4f13d0b22ae11f58c6d3a2939c76c5f5f126
+  octokit (10.0.0) sha256=82e99a539b7637b7e905e6d277bb0c1a4bed56735935cc33db6da7eae49a24e8
   optparse (0.8.1) sha256=42bea10d53907ccff4f080a69991441d611fbf8733b60ed1ce9ee365ce03bd1a
   os (1.1.4) sha256=57816d6a334e7bd6aed048f4b0308226c5fb027433b67d90a9ab435f35108d3f
   ostruct (0.6.3) sha256=95a2ed4a4bd1d190784e666b47b2d3f078e4a9efda2fccf18f84ddc6538ed912
@@ -331,6 +354,7 @@ CHECKSUMS
   rouge (3.28.0) sha256=0d6de482c7624000d92697772ab14e48dca35629f8ddf3f4b21c99183fd70e20
   ruby2_keywords (0.0.5) sha256=ffd13740c573b7301cf7a2e61fc857b2a8e3d3aff32545d6f8300d8bae10e3ef
   rubyzip (2.4.1) sha256=8577c88edc1fde8935eb91064c5cb1aef9ad5494b940cf19c775ee833e075615
+  sawyer (0.9.3) sha256=0d0f19298408047037638639fe62f4794483fb04320269169bd41af2bdcf5e41
   security (0.1.5) sha256=3a977a0eca7706e804c96db0dd9619e0a94969fe3aac9680fcfc2bf9b8a833b7
   signet (0.21.0) sha256=d617e9fbf24928280d39dcfefba9a0372d1c38187ffffd0a9283957a10a8cd5b
   simctl (1.6.10) sha256=b99077f4d13ad81eace9f86bf5ba4df1b0b893a4d1b368bd3ed59b5b27f9236b
@@ -346,6 +370,7 @@ CHECKSUMS
   xcodeproj (1.27.0) sha256=8cc7a73b4505c227deab044dce118ede787041c702bc47636856a2e566f854d3
   xcpretty (0.4.1) sha256=b14c50e721f6589ee3d6f5353e2c2cfcd8541fa1ea16d6c602807dd7327f3892
   xcpretty-travis-formatter (1.0.1) sha256=aacc332f17cb7b2cba222994e2adc74223db88724fe76341483ad3098e232f93
+  zeitwerk (2.8.2) sha256=7212a61311083c604184b1ea2574b9aa05cd14f855a0841c06985cabe9181d12
 
 BUNDLED WITH
    2.6.9

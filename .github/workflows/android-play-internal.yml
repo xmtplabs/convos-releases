@@ -38,7 +38,8 @@ jobs:
       group: play-internal-${{ github.repository }}
       cancel-in-progress: false
     # Resolves the play-prod environment OF THE CALLER REPO: its secrets
-    # and its deployment-branch policy (dev only) apply to this job.
+    # and its deployment-branch policy (release/hotfix branches; the dev
+    # stream moved to Firebase) apply to this job.
     environment: play-prod
     timeout-minutes: 45
     permissions:
@@ -93,6 +94,7 @@ jobs:
           printf '%s' "$PLAY_SA_B64" | base64 -d > "$RUNNER_TEMP/play-sa.json"
 
       - name: Run fastlane android play_internal
+        id: fastlane
         working-directory: ${{ inputs.project-dir }}
         env:
           # Absolute path: gradle's file() resolves relative paths against
@@ -124,8 +126,11 @@ jobs:
           retention-days: 14
 
       # Record this RC in the train manifest (release/hotfix branches only).
+      # always() + fastlane.outcome guards: record the upload even when a
+      # later Sentry/artifact step fails, but never when the upload itself
+      # didn't succeed.
       - name: Record RC in train manifest
-        if: startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
         uses: actions/create-github-app-token@v1
         id: bot
         with:
@@ -134,24 +139,12 @@ jobs:
           owner: xmtplabs
           repositories: convos-releases
       - name: Append manifest entry
-        if: startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
         run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#*/}"
           version_code=$(( $(git show -s --format=%ct HEAD) / 60 ))
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          for attempt in 1 2 3; do
-            rm -rf /tmp/train && git clone --quiet --depth 1 \
-              "https://x-access-token:${GH_TOKEN}@github.com/xmtplabs/convos-releases.git" /tmp/train
-            f="/tmp/train/releases/$version/manifest.yml"
-            [ -f "$f" ] || { echo "::error::no manifest for $version — was this branch cut by the train?"; exit 1; }
-            PATH="$(nix build nixpkgs#yq-go --no-link --print-out-paths)/bin:$PATH" \
-              /tmp/train/scripts/manifest.sh append-rc "$f" "${{ github.repository }}" \
-              "${{ github.sha }}" "$run_url" version-code "$version_code"
-            git -C /tmp/train -c user.name=convos-releases-bot -c user.email="convos-releases-bot[bot]@users.noreply.github.com" \
-              commit -am "train: rc ${{ github.repository }}@${GITHUB_SHA:0:7} for $version" || exit 0
-            git -C /tmp/train push origin HEAD:main && break
-            echo "push race, retry $attempt"; sleep $((attempt * 3))
-          done
+          nix run github:xmtplabs/convos-releases#train -- append-rc \
+            --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --key version-code --value "$version_code"

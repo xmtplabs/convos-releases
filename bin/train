@@ -1,0 +1,166 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "dry/monads"
+require_relative "../lib/train"
+
+def fail_loud(message)
+  if ENV["GITHUB_ACTIONS"] == "true"
+    warn "::error::#{message}"
+  else
+    warn "train: #{message}"
+  end
+  exit 1
+end
+
+# unwrap_result: the single place a Train::Cut/Append Result becomes an exit
+# code. Failure prints the message and exits 1; any Success (including the
+# "declined, not cut time" Success(:skipped) variant) exits 0.
+def unwrap_result(result)
+  case result
+  when Dry::Monads::Success
+    result.value!
+  when Dry::Monads::Failure
+    fail_loud(result.failure)
+  else
+    raise TypeError, "expected a Dry::Monads::Result, got #{result.class}"
+  end
+end
+
+def cmd_cut(argv)
+  opts = { dry_run: false, force: false, schedule: nil, date: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train cut [--dry-run] [--force] [--schedule CRON] [--date YYYY-MM-DD]"
+    o.on("--dry-run") { opts[:dry_run] = true }
+    o.on("--force") { opts[:force] = true }
+    o.on("--schedule CRON") { |v| opts[:schedule] = v }
+    o.on("--date DATE") { |v| opts[:date] = v }
+  end.parse!(argv)
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  cut = Train::Cut.new(github: github, releases_dir: Dir.pwd)
+  unwrap_result(cut.run(force: opts[:force], schedule: opts[:schedule], date_override: opts[:date]))
+end
+
+def cmd_append_rc(argv)
+  opts = { dry_run: false, repo: nil, sha: nil, run: nil, key: nil, value: nil, version: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train append-rc --repo OWNER/NAME --sha SHA --run URL --key (version-code|build-number) --value N [--dry-run] [--version X.Y.Z]"
+    o.on("--repo REPO") { |v| opts[:repo] = v }
+    o.on("--sha SHA") { |v| opts[:sha] = v }
+    o.on("--run URL") { |v| opts[:run] = v }
+    o.on("--key KEY") { |v| opts[:key] = v }
+    o.on("--value N") { |v| opts[:value] = v }
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+
+  %i[repo sha run key value].each do |k|
+    fail_loud("append-rc: --#{k.to_s.tr("_", "-")} is required") unless opts[k]
+  end
+  unless %w[version-code build-number].include?(opts[:key])
+    fail_loud("append-rc: --key must be version-code or build-number, got '#{opts[:key]}'")
+  end
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  append = Train::Append.new(github: github)
+  unwrap_result(append.run(
+    repo: opts[:repo], sha: opts[:sha], run_url: opts[:run],
+    key: opts[:key], value: opts[:value], version: opts[:version]
+  ))
+end
+
+def cmd_seed_notes(argv)
+  opts = { repo: nil, since: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train seed-notes --repo OWNER/NAME [--since YYYY-MM-DD]"
+    o.on("--repo REPO") { |v| opts[:repo] = v }
+    o.on("--since DATE") { |v| opts[:since] = v }
+  end.parse!(argv)
+
+  fail_loud("seed-notes: --repo is required") unless opts[:repo]
+
+  github = Train::Github.new
+  since = opts[:since] || Train::Notes.default_since
+  prs = github.merged_prs_since(opts[:repo], since)
+  puts Train::Notes.format(prs)
+end
+
+def cmd_bump_version(argv)
+  mode = argv.shift
+  dir = argv.shift
+  new_version = argv.shift
+
+  fail_loud("bump-version: usage: train bump-version (read|bump) DIR [NEW_VERSION]") unless mode && dir
+
+  case mode
+  when "read"
+    puts Train::Versions.read(dir)
+  when "bump"
+    fail_loud("bump-version: bump needs NEW_VERSION") unless new_version
+    Train::Versions.bump(dir, new_version)
+    puts new_version
+  else
+    fail_loud("bump-version: unknown mode '#{mode}'")
+  end
+rescue Train::Versions::Error => e
+  fail_loud(e.message)
+end
+
+def cmd_status(argv)
+  version = argv.shift
+  releases_dir = File.join(Dir.pwd, "releases")
+
+  files =
+    if version
+      [File.join(releases_dir, version, "manifest.yml")]
+    else
+      Dir.glob(File.join(releases_dir, "*", "manifest.yml")).sort
+    end
+
+  files.each do |f|
+    unless File.exist?(f)
+      fail_loud("status: no manifest at #{f}")
+    end
+    print_status(f)
+  end
+end
+
+def print_status(file)
+  data = Train::Manifest.read(file)
+  puts "#{data["version"]} (#{data["kind"]}) — cut #{data["cut-date"]} — status: #{data["status"]}"
+  (data["repos"] || {}).each do |repo, info|
+    puts "  #{repo}: #{info["status"]} @ #{info["source-sha"]} [#{info["release-branch"]}]"
+    Array(info["rc"]).each do |rc|
+      extras = rc.reject { |k, _| %w[sha run].include?(k) }.map { |k, v| "#{k}=#{v}" }.join(" ")
+      puts "    rc: #{rc["sha"]} #{extras} (#{rc["run"]})"
+    end
+    if info["promoted"]
+      puts "    promoted: #{info["promoted"]}"
+    end
+  end
+  puts
+end
+
+COMMANDS = {
+  "cut" => method(:cmd_cut),
+  "append-rc" => method(:cmd_append_rc),
+  "seed-notes" => method(:cmd_seed_notes),
+  "bump-version" => method(:cmd_bump_version),
+  "status" => method(:cmd_status)
+}.freeze
+
+command = ARGV.shift
+handler = COMMANDS[command]
+unless handler
+  warn "train: unknown command '#{command}'"
+  warn "usage: train (cut|append-rc|seed-notes|bump-version|status) ..."
+  exit 1
+end
+
+begin
+  handler.call(ARGV)
+rescue StandardError => e
+  fail_loud("#{e.class}: #{e.message}")
+end
