@@ -14,8 +14,13 @@ jobs:
         with:
           nix_conf: |
             experimental-features = nix-command flakes
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Ruby tests
-        run: nix develop --command ruby -Ilib -Itest test/run_all.rb
+        run: nix build -L .#train
       - name: Lint workflows
         run: |
           nix run nixpkgs#actionlint -- \
