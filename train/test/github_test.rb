@@ -88,6 +88,19 @@ class GithubTest < Minitest::Test
     refute_includes error.message, token
   end
 
+  def test_command_error_redacts_token_url_from_stderr
+    token = "ghs_supersecrettoken1234567890"
+    cmd = %w[git push origin HEAD:main]
+    stderr = "fatal: unable to access 'https://x-access-token:#{token}@github.com/xmtplabs/convos-releases.git/': 403"
+
+    error = Train::Github::CommandError.new(cmd, stdout: "", stderr: stderr, status: FakeFailedStatus.new(false))
+
+    assert_includes error.message, "<redacted>"
+    refute_includes error.message, token
+    # the raw stderr stays available for programmatic use
+    assert_includes error.stderr, token
+  end
+
   # ---- dry-run: must never touch Octokit ----
 
   def test_dry_run_short_circuits_before_client_instantiation
@@ -146,14 +159,14 @@ class GithubTest < Minitest::Test
 
   # ---- pr_create ----
 
-  def test_pr_create_returns_normalized_result
+  def test_pr_create_calls_octokit_and_returns_nil
     client = FakeOctokitClient.new
     client.stub_create_pull_request({ number: 7, html_url: "https://github.com/o/r/pull/7" })
     gh = Train::Github.new(client: client)
 
     result = gh.pr_create(repo: "o/r", base: "main", head: "feat", title: "t", body: "b")
 
-    assert_equal({ "number" => 7, "url" => "https://github.com/o/r/pull/7" }, result)
+    assert_nil result
   end
 
   # ---- pr_merge_auto: resolves node_id then posts the GraphQL mutation ----

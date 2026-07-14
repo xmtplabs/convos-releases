@@ -94,7 +94,7 @@ class ManifestTest < Minitest::Test
 
   def test_append_rc_rejects_non_integer_values
     init_with_one_repo
-    ["", "abc", "4.21", "-1", "1a", " 1"].each do |bad|
+    ["", "abc", "4.21", "-1", "1a", " 1", "0", "000"].each do |bad|
       assert_raises(Train::Manifest::Error, "expected rejection for #{bad.inspect}") do
         Train::Manifest.append_rc(
           file, repo: "xmtplabs/convos-ios", sha: "abc123", run: "https://run/1", key: "build-number", value: bad
@@ -110,11 +110,11 @@ class ManifestTest < Minitest::Test
     assert_equal "branched", data["repos"]["xmtplabs/convos-ios"]["status"]
   end
 
-  def test_get_reads_nested_paths
+  def test_set_status_writes_top_level_status
     init_with_one_repo
-    assert_equal "cut", Train::Manifest.get(file, "status")
-    assert_equal "2.1.0", Train::Manifest.get(file, "version")
-    assert_equal "sha-ios", Train::Manifest.get(file, "repos", "xmtplabs/convos-ios", "source-sha")
+    Train::Manifest.set_status(file, "branched")
+    data = Train::Manifest.read(file)
+    assert_equal "branched", data["status"]
   end
 
   # YAML field names must be EXACTLY kebab-case, matching what the bash

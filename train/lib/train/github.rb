@@ -23,13 +23,15 @@ module Train
         @stderr = stderr
         @status = status
         redacted_cmd = cmd.map { |arg| self.class.redact(arg) }
-        super("command failed (#{status}): #{redacted_cmd.join(" ")}\n#{stderr}")
+        # stderr needs the same treatment as argv: git failures echo the
+        # remote URL ("fatal: unable to access 'https://token@...'").
+        super("command failed (#{status}): #{redacted_cmd.join(" ")}\n#{self.class.redact(stderr.to_s)}")
       end
 
       # redact: strips userinfo (e.g. x-access-token:<TOKEN>) out of any URL
-      # embedded in a command argument, so a failed clone/push whose argv
-      # carries `https://x-access-token:<TOKEN>@github.com/...` never leaks
-      # the token into logs via this error's message.
+      # embedded in the text, so failed clone/push commands never leak the
+      # token into logs via this error's message — neither from argv nor
+      # from git's own error output.
       def self.redact(arg)
         arg.gsub(%r{//[^/@\s]+@}, "//<redacted>@")
       end
@@ -169,6 +171,15 @@ module Train
       end
     end
 
+    # push: returns boolean (true on success, false on a rejected/failed
+    # push) — the seam's ONE boolean mutation; everything else raises
+    # CommandError. Callers MUST check this return value; a `false` here
+    # (e.g. non-fast-forward) is a real, expected failure mode (lost a race
+    # to another writer, or a branch already exists at a different sha) —
+    # not a CommandError, precisely so callers can distinguish "rejected
+    # push" from "git itself blew up" and react accordingly (retry, fail
+    # loud, or skip a downstream step) instead of it being conflated with
+    # every other subprocess error.
     def push(dir, refspec, force: false)
       mutate!("git push origin #{refspec} (#{dir})", default: true) do
         args = ["git", "-C", dir, "push"]
@@ -185,10 +196,14 @@ module Train
       end
     end
 
+    # pr_create: return value is intentionally discarded (nil) — both
+    # call sites (cut.rb) create-and-forget, and pr_merge_auto resolves the
+    # PR itself (by branch name or number) rather than needing this
+    # return's node_id.
     def pr_create(repo:, base:, head:, title:, body:)
       mutate!("create PR #{repo} #{head}->#{base}: #{title.inspect}") do
-        pr = api! { client.create_pull_request(repo, base, head, title, body) }
-        { "number" => pr[:number], "url" => pr[:html_url] }
+        api! { client.create_pull_request(repo, base, head, title, body) }
+        nil
       end
     end
 

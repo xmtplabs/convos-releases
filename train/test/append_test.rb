@@ -12,7 +12,6 @@ require_relative "support/fake_github"
 class AppendTest < Minitest::Test
   def setup
     @out = StringIO.new
-    @err = StringIO.new
     @gh = FakeGithub.new
     @gh.stub_clone("convos-releases") { |dest| write_manifest_fixture(dest, "2.1.0") }
   end
@@ -27,7 +26,7 @@ class AppendTest < Minitest::Test
   end
 
   def new_append(gh = @gh)
-    Train::Append.new(github: gh, out: @out, err: @err)
+    Train::Append.new(github: gh, out: @out)
   end
 
   # retriable's default backoff sleeps between attempts; every retry test
@@ -47,6 +46,16 @@ class AppendTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/positive integer/, result.failure)
     refute @gh.called?(:clone)
+  end
+
+  def test_rejects_zero_and_leading_zeros
+    ["0", "000"].each do |bad|
+      result = new_append.run(**base_args, value: bad)
+
+      assert_instance_of Dry::Monads::Result::Failure, result
+      assert_match(/positive integer/, result.failure)
+      refute @gh.called?(:clone)
+    end
   end
 
   def test_requires_a_derivable_version
@@ -132,12 +141,17 @@ class AppendTest < Minitest::Test
     assert_equal 3, @gh.calls_for(:push).size
   end
 
-  def test_transient_clone_failure_is_retried_as_push_contention
-    @gh.fail_clone_times("convos-releases", 1) # first clone raises CommandError, second succeeds
+  def test_clone_command_error_propagates_unchanged_without_retry
+    # Only a push failure is PushContention (retried); a clone/config/
+    # commit CommandError must propagate unchanged — no retry, and it must
+    # NOT be mislabeled as "push contention". fail_clone_times(..., 99)
+    # would retry forever under the old blanket-rescue behavior; here it
+    # must raise straight out of run() after exactly one attempt.
+    @gh.fail_clone_times("convos-releases", 99)
 
-    result = without_sleep { new_append.run(**base_args, version: "2.1.0") }
-
-    assert_equal Dry::Monads::Success(true), result
-    assert_equal 2, @gh.calls_for(:clone).size
+    assert_raises(Train::Github::CommandError) do
+      without_sleep { new_append.run(**base_args, version: "2.1.0") }
+    end
+    assert_equal 1, @gh.calls_for(:clone).size, "clone must not be retried for a non-push CommandError"
   end
 end

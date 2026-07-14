@@ -9,6 +9,12 @@ module Train
   module Manifest
     class Error < StandardError; end
 
+    # POSITIVE_INT_RE: single source of truth for "positive integer" as
+    # accepted by append_rc's id-value (build-number/version-code). Used
+    # here AND by Append#run so both entry points reject the same things —
+    # notably "0"/"000", which `/\A[0-9]+\z/` would have let through.
+    POSITIVE_INT_RE = /\A[1-9][0-9]*\z/.freeze
+
     module_function
 
     # init: writes a brand-new manifest. Refuses to overwrite an existing
@@ -71,12 +77,16 @@ module Train
       data
     end
 
-    # get: dotted-path-ish lookup mirroring the small set of paths the bash
-    # actually uses (".status", ".\"cut-date\"", ".version",
-    # ".repos.\"owner/repo\".\"source-sha\"", etc). Callers pass an array of
-    # keys instead of a yq path string — simpler and doesn't need a parser.
-    def get(file, *keys)
-      read(file).dig(*keys)
+    # set_status: top-level "status" writer (mirrors set_repo_status). Cut
+    # uses this to advance a manifest past "cut" once every repo's ensure
+    # has succeeded — reconcile_in_flight only treats status:"cut" as
+    # in-flight, so a manifest stuck at "cut" forever would block every
+    # subsequent week's cut.
+    def set_status(file, status)
+      data = read(file)
+      data["status"] = status
+      write(file, data)
+      data
     end
 
     def read(file)
@@ -109,7 +119,7 @@ module Train
 
     def validate_integer!(value)
       str = value.to_s
-      unless str.match?(/\A[0-9]+\z/)
+      unless str.match?(POSITIVE_INT_RE)
         raise Error, "id-value must be a positive integer, got '#{value}'"
       end
 

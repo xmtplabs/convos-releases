@@ -184,6 +184,35 @@ class CutTest < Minitest::Test
     refute Dir.exist?(File.join(@releases_dir, "releases", "2.1.0"))
   end
 
+  def test_last_weeks_branched_manifest_does_not_block_this_weeks_cut
+    # CRITICAL regression: before Manifest.set_status existed, a completed
+    # cut's manifest stayed at status:"cut" forever, so reconcile_in_flight
+    # (which fails loud on any OTHER-date status:"cut" manifest) blocked
+    # every subsequent week's cut. Once run() advances a fully-succeeded
+    # cut's manifest to "branched", an older-date "branched" manifest must
+    # no longer trip that guard.
+    last_week = File.join(@releases_dir, "releases", "2.0.0")
+    FileUtils.mkdir_p(last_week)
+    mfile = File.join(last_week, "manifest.yml")
+    Train::Manifest.init(
+      mfile, version: "2.0.0", kind: "release", cut_date: "2026-07-09",
+      repos: { "xmtplabs/convos-ios" => "old-sha", "xmtplabs/convos-client" => "old-sha" }
+    )
+    Train::Manifest.set_status(mfile, "branched")
+
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert File.exist?(File.join(@releases_dir, "releases", "2.1.0", "manifest.yml"))
+  end
+
   def test_stale_in_flight_manifest_aborts_even_when_it_sorts_after_a_same_day_one
     # A same-day status:cut manifest ("1.9.0", glob-sorts FIRST) and an
     # older-date status:cut manifest ("2.0.0", glob-sorts SECOND). The old
@@ -211,6 +240,99 @@ class CutTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/2\.0\.0.*still status:cut/i, result.failure)
     refute Dir.exist?(File.join(@releases_dir, "releases", "2.1.0"))
+  end
+
+  def test_manifest_push_failure_short_circuits_before_any_app_repo_mutation
+    # The manifest-first publish push (init_or_reconcile_manifest) goes to
+    # @releases_dir over "HEAD:main". If THAT push fails (non-fast-forward
+    # race), the pipeline must fail loud before ever touching either app
+    # repo — no release branch push, no bump/release PR creation. (The
+    # local manifest.yml/notes are already written+committed locally before
+    # the push is attempted — that's expected; only the app-repo mutations
+    # that come AFTER the push must not happen.)
+    @gh.fail_push(File.basename(@releases_dir))
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/manifest push to convos-releases main failed/i, result.failure)
+
+    %i[checkout_branch pr_create pr_merge_auto].each do |m|
+      refute @gh.called?(m), "#{m} must not be called when the manifest push itself failed"
+    end
+    # only the manifest-publish push was attempted — no release-branch pushes
+    app_repo_pushes = @gh.calls_for(:push).reject { |c| c.args.first == @releases_dir }
+    assert_empty app_repo_pushes, "no app-repo push should be attempted after the manifest push fails"
+  end
+
+  def test_release_branch_push_failure_fails_that_repo_without_marking_it_branched
+    # ensure_release_branch's create-path push failing must return a
+    # Failure naming the repo and must NOT print "created" or advance that
+    # repo's manifest status to "branched" — while the sibling repo (whose
+    # push succeeds) still gets fully processed (existing split-outcome
+    # pattern).
+    @gh.fail_push_times("sha-convos-ios:refs/heads/release/2.1.0", 99) # matches convos-ios's release-branch refspec only
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/xmtplabs\/convos-ios: failed to push release\/2\.1\.0/i, result.failure)
+    refute_match(/convos-ios: created release/, @out.string)
+
+    mfile = File.join(@releases_dir, "releases", "2.1.0", "manifest.yml")
+    data = Train::Manifest.read(mfile)
+    assert_equal "pending", data["repos"]["xmtplabs/convos-ios"]["status"]
+    assert_equal "branched", data["repos"]["xmtplabs/convos-client"]["status"]
+    # top-level status must NOT advance to "branched" — convos-ios failed
+    assert_equal "cut", data["status"]
+  end
+
+  def test_bump_branch_push_failure_warns_and_skips_pr_create_without_aborting
+    # ensure_bump_pr's push failing is best-effort: warn and return early,
+    # WITHOUT calling pr_create for a branch that never made it to origin.
+    # (FakeGithub's bump-branch refspec, "bot/bump-2.2.0", doesn't carry a
+    # per-repo sha the way the release-branch refspec does, so this fails
+    # the bump push for BOTH repos — still enough to prove the fix: for
+    # EVERY repo, no bump PR is created for the unpushed branch, but the
+    # independent release-branch push and release PR step still succeed,
+    # and the overall run still reports Success since ensure_bump_pr is
+    # best-effort.)
+    @gh.fail_push_times("bot/bump-2.2.0", 99)
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/xmtplabs\/convos-ios: bump branch push failed; skipping bump PR/i, @err.string)
+    assert_match(/xmtplabs\/convos-client: bump branch push failed; skipping bump PR/i, @err.string)
+
+    bump_pr_titles = @gh.calls_for(:pr_create).map { |c| c.kwargs[:title] }
+    refute_includes bump_pr_titles, "Bump version to 2.2.0", "pr_create must not be called for an unpushed bump branch"
+
+    ios_pr_titles = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == "xmtplabs/convos-ios" }.map { |c| c.kwargs[:title] }
+    client_pr_titles = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == "xmtplabs/convos-client" }.map { |c| c.kwargs[:title] }
+    assert_includes ios_pr_titles, "Release 2.1.0", "release PR step is independent and must still run"
+    assert_includes client_pr_titles, "Release 2.1.0"
+
+    # release-branch check (the only hard-failing step) passed for both
+    # repos, so the overall run still succeeds and both are "branched".
+    mfile = File.join(@releases_dir, "releases", "2.1.0", "manifest.yml")
+    data = Train::Manifest.read(mfile)
+    assert_equal "branched", data["repos"]["xmtplabs/convos-ios"]["status"]
+    assert_equal "branched", data["repos"]["xmtplabs/convos-client"]["status"]
+    assert_equal "branched", data["status"], "top-level status must advance once all repos succeed"
   end
 
   def test_release_branch_mismatch_fails_loud

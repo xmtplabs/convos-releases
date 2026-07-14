@@ -24,17 +24,16 @@ module Train
     TRIES = 3
     BASE_INTERVAL = 3
 
-    def initialize(github:, out: $stdout, err: $stderr)
+    def initialize(github:, out: $stdout)
       @gh = github
       @out = out
-      @err = err
     end
 
     # run: returns a Result — Success(true) on completion (including
     # dry-run), Failure(message) on hard failure.
     def run(repo:, sha:, run_url:, key:, value:, version: nil)
       value_str = value.to_s
-      unless value_str.match?(/\A[0-9]+\z/)
+      unless value_str.match?(Manifest::POSITIVE_INT_RE)
         return Failure("id-value must be a positive integer, got '#{value_str}'")
       end
 
@@ -65,10 +64,12 @@ module Train
 
     # push_once: fresh clone; append; commit; push. Returns the Result
     # directly for a hard (non-retriable) failure, e.g. no manifest for this
-    # version. Raises PushContention on a lost race (push rejected, or the
-    # clone/commit subprocess itself failed transiently) so Retriable
-    # retries the whole clone from scratch — a stale local checkout must
-    # never be reused across attempts.
+    # version. Raises PushContention ONLY when the push itself loses a race
+    # (returns false) — clone/config/commit CommandErrors propagate
+    # unchanged (they are not "push contention", and Retriable isn't
+    # configured to catch/retry them here, so they abort the whole append
+    # after this ONE attempt rather than being silently retried under a
+    # misleading label).
     def push_once(repo:, sha:, run_url:, key:, value_str:, version:)
       dir = Dir.mktmpdir("train-append-")
       begin
@@ -89,8 +90,6 @@ module Train
         raise PushContention unless @gh.push(dir, "HEAD:main")
 
         Success(true)
-      rescue Github::CommandError
-        raise PushContention
       ensure
         FileUtils.remove_entry(dir) if Dir.exist?(dir)
       end

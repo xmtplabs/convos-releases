@@ -71,6 +71,12 @@ module Train
         # status. `yield` below still short-circuits to the Failure after
         # the commit/push has happened.
         result = ensure_all_repos(work: work, version: version, nxt: nxt, mfile: mfile, sha: sha)
+        # Advance the top-level manifest status past "cut" ONLY when every
+        # repo succeeded — reconcile_in_flight treats status:"cut" as
+        # in-flight, so leaving it at "cut" after a partial failure is
+        # correct (still in-flight); advancing it here, before
+        # persist_statuses, ensures the same commit publishes both.
+        Manifest.set_status(mfile, "branched") if result.success?
         persist_statuses(mdir, version)
         yield result
 
@@ -186,7 +192,9 @@ module Train
       @gh.git_config_bot(@releases_dir)
       @gh.add(@releases_dir, mdir)
       @gh.commit(@releases_dir, "train: cut #{version}")
-      @gh.push(@releases_dir, "HEAD:main")
+      unless @gh.push(@releases_dir, "HEAD:main")
+        return Failure("manifest push to convos-releases main failed (non-fast-forward? retry the cut)")
+      end
 
       Success(sha)
     end
@@ -255,7 +263,9 @@ module Train
     def ensure_release_branch(dir:, repo:, version:, sha:)
       existing = @gh.ls_remote(dir, "refs/heads/release/#{version}")
       if existing.empty?
-        @gh.push(dir, "#{sha}:refs/heads/release/#{version}")
+        unless @gh.push(dir, "#{sha}:refs/heads/release/#{version}")
+          return Failure("#{repo}: failed to push release/#{version}")
+        end
         @out.puts "#{repo}: created release/#{version} @ #{sha}"
       elsif existing != sha
         return Failure("#{repo} release/#{version} exists at #{existing}, expected #{sha}")
@@ -275,7 +285,10 @@ module Train
         @gh.checkout_branch(dir, bump_head, sha)
         Versions.bump(dir, nxt)
         @gh.commit(dir, "chore: bump version to #{nxt} after #{version} cut", all: true)
-        @gh.push(dir, bump_head, force: true)
+        unless @gh.push(dir, bump_head, force: true)
+          loud_warning("#{repo}: bump branch push failed; skipping bump PR")
+          return
+        end
         @gh.pr_create(
           repo: repo, base: "dev", head: bump_head,
           title: "Bump version to #{nxt}",
