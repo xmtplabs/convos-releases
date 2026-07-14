@@ -15,6 +15,14 @@ platform :ios do
     build_number = [git_count, latest_tf + 1].max
     UI.message("Build number: git=#{git_count}, latest_tf=#{latest_tf}, using=#{build_number}")
 
+    # Surface the chosen CFBundleVersion to the workflow (train manifest
+    # recording); no-op outside GitHub Actions. .to_s.empty? guards against
+    # an exported-but-empty GITHUB_OUTPUT, which would otherwise crash
+    # File.open("").
+    unless ENV["GITHUB_OUTPUT"].to_s.empty?
+      File.open(ENV["GITHUB_OUTPUT"], "a") { |f| f.puts "build-number=#{build_number}" }
+    end
+
     increment_build_number(
       build_number: build_number,
       xcodeproj: PROJECT,

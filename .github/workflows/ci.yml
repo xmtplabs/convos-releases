@@ -1,0 +1,28 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: warp-ubuntu-latest-x64-8x
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Ruby tests
+        run: nix build -L .#train
+      - name: Lint workflows
+        run: |
+          nix run nixpkgs#actionlint -- \
+            -ignore 'property "(prod_keystore_base64|prod_keystore_password|prod_key_alias|prod_key_password|play_service_account_json|releases_bot_app_id|releases_bot_private_key)" is not defined in object type' \
+            .github/workflows/*.yml

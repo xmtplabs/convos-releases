@@ -1,0 +1,68 @@
+# Weekly release-branch cut for convos-ios + convos-client.
+#
+# Durable state = releases/<version>/manifest.yml (committed FIRST); every
+# step is ensure-state, so re-dispatching after any failure converges. All
+# cut logic lives in bin/train (Train::Cut) — this workflow only plumbs
+# credentials and the trigger context.
+name: Release Cut
+
+on:
+  schedule:
+    # Both correspond to 15:45 America/New_York across DST; the slot
+    # decision step keeps exactly one.
+    - cron: "45 19 * * *"
+    - cron: "45 20 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Bypass day/skip checks
+        type: boolean
+        default: false
+      dry-run:
+        description: Print the plan, mutate nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-train
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    runs-on: warp-ubuntu-latest-x64-8x
+    timeout-minutes: 20
+    permissions:
+      contents: write   # commit manifest/notes to this repo
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Mint bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases,convos-ios,convos-client
+
+      # All cut logic (slot/day/skip decision, in-flight recovery, capture,
+      # manifest-first, branch/PR ensure-state) lives in the tested `train`
+      # CLI — this workflow only plumbs credentials and the trigger context.
+      - name: Cut
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_SCHEDULE: ${{ github.event.schedule }}
+          TRAIN_FORCE: ${{ inputs.force || 'false' }}
+          TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
+        run: |
+          args=(cut)
+          [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")
+          [ "$TRAIN_FORCE" = "true" ] && args+=(--force)
+          [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          nix develop --command train "${args[@]}"

@@ -1,0 +1,4 @@
+# Release train schedule. The cron slots in release-cut.yml are the time
+# authority (15:45 America/New_York); this file controls day + skips.
+cut-day: thursday
+skip-dates: []           # ISO dates, e.g. [2026-11-26]

@@ -38,7 +38,8 @@ jobs:
       group: play-internal-${{ github.repository }}
       cancel-in-progress: false
     # Resolves the play-prod environment OF THE CALLER REPO: its secrets
-    # and its deployment-branch policy (dev only) apply to this job.
+    # and its deployment-branch policy (release/hotfix branches; the dev
+    # stream moved to Firebase) apply to this job.
     environment: play-prod
     timeout-minutes: 45
     permissions:
@@ -93,6 +94,7 @@ jobs:
           printf '%s' "$PLAY_SA_B64" | base64 -d > "$RUNNER_TEMP/play-sa.json"
 
       - name: Run fastlane android play_internal
+        id: fastlane
         working-directory: ${{ inputs.project-dir }}
         env:
           # Absolute path: gradle's file() resolves relative paths against
@@ -122,3 +124,27 @@ jobs:
           path: ${{ inputs.project-dir }}/app/build/outputs/bundle/prodRelease/*.aab
           if-no-files-found: warn
           retention-days: 14
+
+      # Record this RC in the train manifest (release/hotfix branches only).
+      # always() + fastlane.outcome guards: record the upload even when a
+      # later Sentry/artifact step fails, but never when the upload itself
+      # didn't succeed.
+      - name: Record RC in train manifest
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
+        uses: actions/create-github-app-token@v1
+        id: bot
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases
+      - name: Append manifest entry
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          VERSION_CODE: ${{ steps.fastlane.outputs.version-code }}
+        run: |
+          nix run github:xmtplabs/convos-releases#train --option access-tokens "github.com=$GH_TOKEN" -- append-rc \
+            --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --key version-code --value "${VERSION_CODE:?lane did not publish version-code}"

@@ -43,6 +43,11 @@ jobs:
   testflight_prod:
     name: Build & upload to TestFlight (Prod)
     runs-on: ${{ inputs.runner }}
+    # Serialize TestFlight mutations per caller repo (RC uploads now; Phase-2
+    # promotion joins the same group). Queue, never cancel.
+    concurrency:
+      group: testflight-${{ github.repository }}
+      cancel-in-progress: false
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -102,6 +107,7 @@ jobs:
         run: ./Scripts/generate-secrets-secure.sh
 
       - name: Run fastlane testflight_prod
+        id: fastlane
         env:
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_URL: ${{ github.workspace }}/convos-certificates
@@ -143,6 +149,30 @@ jobs:
           path: build/Convos-Prod-TestFlight.ipa
           if-no-files-found: warn
           retention-days: 14
+
+      # Record this RC in the train manifest (release/hotfix branches only).
+      # always() + fastlane.outcome guards: record the upload even when a
+      # later Sentry/artifact step fails, but never when the upload itself
+      # didn't succeed.
+      - name: Record RC in train manifest
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
+        uses: actions/create-github-app-token@v1
+        id: bot
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases
+      - name: Append manifest entry
+        if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          BUILD_NUMBER: ${{ steps.fastlane.outputs.build-number }}
+        run: |
+          nix run github:xmtplabs/convos-releases#train --option access-tokens "github.com=$GH_TOKEN" -- append-rc \
+            --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --key build-number --value "${BUILD_NUMBER:?lane did not publish build-number}"
 
       - name: Push new paths to xmtp Cachix
         if: success()

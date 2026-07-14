@@ -74,11 +74,18 @@ platform :android do
       UI.user_error!("versionCode #{version_code} implausible (expected 29,000,000..#{now_code + 1440}); check HEAD commit timestamp")
     end
 
+    # Surface the chosen versionCode to the workflow (train manifest
+    # recording); no-op outside GitHub Actions. .to_s.empty? guards against
+    # an exported-but-empty GITHUB_OUTPUT, which would otherwise crash
+    # File.open("").
+    unless ENV["GITHUB_OUTPUT"].to_s.empty?
+      File.open(ENV["GITHUB_OUTPUT"], "a") { |f| f.puts "version-code=#{version_code}" }
+    end
+
     # Changelog file supply matches to the AAB's versionCode by filename.
     # Absolute path, resolved once: FastlaneFolder.path can be a memoized
     # RELATIVE "./" and supply evaluates relative paths under a different
-    # cwd than the lane (run 29269883337 failed exactly this way —
-    # "Could not find folder ./metadata/android"; the APK-glob lesson again).
+    # cwd than the lane.
     metadata_dir = File.expand_path(File.join(FastlaneCore::FastlaneFolder.path, "metadata", "android"))
     changelog_dir = File.join(metadata_dir, "en-US", "changelogs")
     FileUtils.mkdir_p(changelog_dir)
@@ -117,5 +124,23 @@ platform :android do
     subject = `git log -1 --pretty=%s`.strip
     branch  = ENV["GITHUB_REF_NAME"] || `git rev-parse --abbrev-ref HEAD`.strip
     "#{subject}\nBranch: #{branch}\nCommit: #{sha}"
+  end
+
+  desc "Build prodRelease APK and upload to Firebase App Distribution (dev-stream prod builds)"
+  lane :prod_adhoc do
+    gradle(task: "assembleProdRelease")
+
+    apk = lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+    UI.user_error!("gradle reported no prodRelease APK output") if apk.to_s.empty? || !File.exist?(apk)
+
+    firebase_app_distribution(
+      app: ENV.fetch("FIREBASE_APP_ID_ANDROID_PROD"),
+      service_credentials_json_data: ENV["FIREBASE_SERVICE_ACCOUNT_JSON_CONTENT"],
+      service_credentials_file: ENV["FIREBASE_SERVICE_ACCOUNT_JSON"],
+      groups: ENV.fetch("FIREBASE_TESTER_GROUPS", "xmtp-prod-internal"),
+      release_notes: play_internal_release_notes[0, 500],
+      android_artifact_type: "APK",
+      android_artifact_path: apk,
+    )
   end
 end
