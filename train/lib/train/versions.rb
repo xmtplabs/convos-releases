@@ -29,7 +29,12 @@ module Train
         raise Error, "inconsistent versions found:\n#{versions.join("\n")}"
       end
 
-      unique.first
+      version = unique.first
+      unless version.match?(VERSION_RE)
+        raise Error, "bad version '#{version}'"
+      end
+
+      version
     end
 
     def bump(dir, new_version)

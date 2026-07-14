@@ -67,6 +67,27 @@ class GithubTest < Minitest::Test
     @out = StringIO.new
   end
 
+  # ---- CommandError: token redaction ----
+
+  FakeFailedStatus = Struct.new(:success?) do
+    def to_s
+      "exit 128"
+    end
+  end
+  private_constant :FakeFailedStatus
+
+  def test_command_error_redacts_token_url_from_message
+    token = "ghs_supersecrettoken1234567890"
+    cmd = ["git", "clone", "--quiet", "https://x-access-token:#{token}@github.com/xmtplabs/convos-releases.git", "dest"]
+
+    error = assert_raises(Train::Github::CommandError) do
+      raise Train::Github::CommandError.new(cmd, stdout: "", stderr: "fatal: authentication failed", status: FakeFailedStatus.new(false))
+    end
+
+    assert_includes error.message, "<redacted>"
+    refute_includes error.message, token
+  end
+
   # ---- dry-run: must never touch Octokit ----
 
   def test_dry_run_short_circuits_before_client_instantiation

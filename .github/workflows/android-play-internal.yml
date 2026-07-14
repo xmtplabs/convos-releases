@@ -144,7 +144,7 @@ jobs:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           VERSION_CODE: ${{ steps.fastlane.outputs.version-code }}
         run: |
-          nix run github:xmtplabs/convos-releases#train -- append-rc \
+          nix run github:xmtplabs/convos-releases#train --option access-tokens "github.com=$GH_TOKEN" -- append-rc \
             --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
             --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --key version-code --value "${VERSION_CODE:?lane did not publish version-code}"

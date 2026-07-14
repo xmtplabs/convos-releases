@@ -184,6 +184,35 @@ class CutTest < Minitest::Test
     refute Dir.exist?(File.join(@releases_dir, "releases", "2.1.0"))
   end
 
+  def test_stale_in_flight_manifest_aborts_even_when_it_sorts_after_a_same_day_one
+    # A same-day status:cut manifest ("1.9.0", glob-sorts FIRST) and an
+    # older-date status:cut manifest ("2.0.0", glob-sorts SECOND). The old
+    # bug returned Success on the first same-day hit and never looked at
+    # the rest of the glob — silently ignoring the stale train that sorts
+    # later. The fix must scan every manifest and still fail on the stale
+    # one, regardless of where it lands in glob order.
+    today_dir = File.join(@releases_dir, "releases", "1.9.0")
+    FileUtils.mkdir_p(today_dir)
+    Train::Manifest.init(
+      File.join(today_dir, "manifest.yml"), version: "1.9.0", kind: "release", cut_date: EDT_THU,
+      repos: { "xmtplabs/convos-ios" => "today-sha", "xmtplabs/convos-client" => "today-sha" }
+    )
+
+    stale_dir = File.join(@releases_dir, "releases", "2.0.0")
+    FileUtils.mkdir_p(stale_dir)
+    Train::Manifest.init(
+      File.join(stale_dir, "manifest.yml"), version: "2.0.0", kind: "release", cut_date: "2026-07-09",
+      repos: { "xmtplabs/convos-ios" => "old-sha", "xmtplabs/convos-client" => "old-sha" }
+    )
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/2\.0\.0.*still status:cut/i, result.failure)
+    refute Dir.exist?(File.join(@releases_dir, "releases", "2.1.0"))
+  end
+
   def test_release_branch_mismatch_fails_loud
     @gh.stub_ls_remote("convos-ios", "refs/heads/release/2.1.0", "some-other-sha")
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
@@ -198,6 +227,44 @@ class CutTest < Minitest::Test
     assert_match(/exists at .* expected/i, result.failure)
   end
 
+  def test_bump_pr_failure_on_one_repo_does_not_abort_the_other_repo
+    # convos-ios's bump-PR step raises (simulated GitHub API failure);
+    # convos-client has no such problem. Both repos' ensure_repo must still
+    # run to completion — convos-client gets its bump PR, release PR, and
+    # "branched" status — and the overall run must still succeed (the
+    # release-branch check, the only hard-failing step, passed for both).
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.fail_pr_create("xmtplabs/convos-ios", message: "GitHub API error: 500")
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/xmtplabs\/convos-ios.*bump PR step failed/i, @err.string)
+
+    mfile = File.join(@releases_dir, "releases", "2.1.0", "manifest.yml")
+    data = Train::Manifest.read(mfile)
+    # ensure_repo doesn't fail this repo's outcome (only ensure_release_branch
+    # can) — status still advances to "branched" even though the bump PR
+    # itself never got created.
+    assert_equal "branched", data["repos"]["xmtplabs/convos-ios"]["status"]
+    assert_equal "branched", data["repos"]["xmtplabs/convos-client"]["status"]
+
+    # convos-client's own bump PR + release PR still went through fully.
+    client_pr_titles = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == "xmtplabs/convos-client" }.map { |c| c.kwargs[:title] }
+    assert_includes client_pr_titles, "Bump version to 2.2.0"
+    assert_includes client_pr_titles, "Release 2.1.0"
+
+    # convos-ios's release PR step still ran (best-effort, independent of
+    # the bump PR failure) even though its bump PR raised.
+    ios_pr_titles = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == "xmtplabs/convos-ios" }.map { |c| c.kwargs[:title] }
+    assert_includes ios_pr_titles, "Release 2.1.0"
+  end
+
   def test_release_branch_mismatch_on_one_repo_still_reports_the_others_outcome
     # convos-ios has a mismatched release branch; convos-client has no such
     # problem. Both ensures must run — convos-client's branch/PRs get
@@ -208,6 +275,7 @@ class CutTest < Minitest::Test
     @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
 
     cut = new_cut
     result = cut.run(force: true, date_override: EDT_THU)
@@ -220,5 +288,15 @@ class CutTest < Minitest::Test
     assert_equal "pending", data["repos"]["xmtplabs/convos-ios"]["status"]
     assert_equal "branched", data["repos"]["xmtplabs/convos-client"]["status"]
     assert @gh.calls_for(:pr_create).any? { |c| c.kwargs[:repo] == "xmtplabs/convos-client" }
+
+    # persist_statuses must run (commit + push the manifest statuses to
+    # @releases_dir) BEFORE the Failure short-circuits `run` — losing
+    # convos-client's successful "branched" status from the committed
+    # manifest would contradict the documented best-effort behavior.
+    releases_commits = @gh.calls_for(:commit).select { |c| c.args.first == @releases_dir }
+    assert releases_commits.any? { |c| c.args[1] =~ /repo statuses/ },
+           "expected a status-persisting commit against @releases_dir, got: #{@gh.calls_for(:commit).map(&:args)}"
+    releases_pushes = @gh.calls_for(:push).select { |c| c.args.first == @releases_dir }
+    assert releases_pushes.any?, "expected persist_statuses to push the manifest commit"
   end
 end

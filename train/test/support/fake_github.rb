@@ -80,6 +80,13 @@ class FakeGithub
     @clone_error_countdown[match] = n
   end
 
+  # fail_pr_create: every subsequent pr_create() call for `repo` raises
+  # Train::Github::ApiError instead of returning normally — simulates a
+  # GitHub API failure inside the best-effort bump-PR/release-PR steps.
+  def fail_pr_create(repo, message: "simulated API failure")
+    (@pr_create_failures ||= {})[repo] = message
+  end
+
   # ---- Github interface ----
 
   def ls_remote(dir, ref)
@@ -169,6 +176,9 @@ class FakeGithub
 
   def pr_create(repo:, base:, head:, title:, body:)
     record(:pr_create, [], { repo: repo, base: base, head: head, title: title, body: body })
+    if @pr_create_failures&.key?(repo)
+      raise ::Train::Github::ApiError, @pr_create_failures[repo]
+    end
   end
 
   def pr_merge_auto(repo:, head_or_number:)

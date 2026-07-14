@@ -22,7 +22,16 @@ module Train
         @stdout = stdout
         @stderr = stderr
         @status = status
-        super("command failed (#{status}): #{cmd.join(" ")}\n#{stderr}")
+        redacted_cmd = cmd.map { |arg| self.class.redact(arg) }
+        super("command failed (#{status}): #{redacted_cmd.join(" ")}\n#{stderr}")
+      end
+
+      # redact: strips userinfo (e.g. x-access-token:<TOKEN>) out of any URL
+      # embedded in a command argument, so a failed clone/push whose argv
+      # carries `https://x-access-token:<TOKEN>@github.com/...` never leaks
+      # the token into logs via this error's message.
+      def self.redact(arg)
+        arg.gsub(%r{//[^/@\s]+@}, "//<redacted>@")
       end
     end
 

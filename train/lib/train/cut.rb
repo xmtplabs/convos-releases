@@ -7,6 +7,7 @@ require_relative "manifest"
 require_relative "versions"
 require_relative "config"
 require_relative "notes"
+require_relative "github"
 
 module Train
   # Ports the release-cut.yml "Cut" step. Runs FROM a checkout of
@@ -63,8 +64,15 @@ module Train
         mfile = File.join(mdir, "manifest.yml")
         sha = yield init_or_reconcile_manifest(mfile: mfile, mdir: mdir, version: version, today: today, sha: sha, work: work)
 
-        yield ensure_all_repos(work: work, version: version, nxt: nxt, mfile: mfile, sha: sha)
+        # Persist whatever statuses ensure_all_repos wrote to the manifest
+        # (e.g. one repo's "branched") UNCONDITIONALLY — even when the other
+        # repo's ensure failed — before yielding the result, so a hard
+        # failure on one repo doesn't lose the successful repo's committed
+        # status. `yield` below still short-circuits to the Failure after
+        # the commit/push has happened.
+        result = ensure_all_repos(work: work, version: version, nxt: nxt, mfile: mfile, sha: sha)
         persist_statuses(mdir, version)
+        yield result
 
         Success(:cut)
       ensure
@@ -127,7 +135,13 @@ module Train
     # train cut TODAY and still status:cut is reconciled; one from an
     # EARLIER date still status:cut means a bump PR never merged or a cut
     # never finished — fail loud rather than silently cutting on top of it.
+    #
+    # Scans EVERY manifest rather than returning on the first same-day
+    # status:cut hit — glob order isn't cut-date order, so a stale
+    # (older-date) status:cut train appearing later in glob order must still
+    # be caught rather than silently skipped.
     def reconcile_in_flight(version, today)
+      in_flight = nil
       Dir.glob(File.join(@releases_dir, "releases", "*", "manifest.yml")).sort.each do |mf|
         data = Manifest.read(mf)
         next unless data["status"] == "cut"
@@ -135,13 +149,17 @@ module Train
         mdate = data["cut-date"]
         mver = data["version"]
         if mdate == today
-          @out.puts "In-flight train #{mver} (cut today, still status:cut) — reconciling it instead of cutting #{version}"
-          return Success(mver)
+          in_flight ||= mver
+          next
         end
 
         return Failure("train #{mver} cut #{mdate} is still status:cut — resolve it (bump PRs merged? cut finished?) before cutting a new train")
       end
-      Success(version)
+
+      if in_flight
+        @out.puts "In-flight train #{in_flight} (cut today, still status:cut) — reconciling it instead of cutting #{version}"
+      end
+      Success(in_flight || version)
     end
 
     def print_dry_run_plan(version, sha)
@@ -210,13 +228,26 @@ module Train
     # ensure_repo: the release-branch check is the only step that can fail
     # this repo's ensure; bump-PR and release-PR steps are best-effort
     # (warn, don't fail) so one repo's flaky auto-merge doesn't block the
-    # other repo's progress.
+    # other repo's progress. Github::ApiError/CommandError raised inside
+    # either best-effort step must not propagate — that would abort
+    # ensure_all_repos entirely and skip the OTHER repo's ensure_repo call,
+    # contradicting the best-effort contract documented above.
     def ensure_repo(work:, repo:, version:, nxt:, sha:)
       dir = File.join(work, repo.split("/").last)
 
       yield ensure_release_branch(dir: dir, repo: repo, version: version, sha: sha)
-      ensure_bump_pr(dir: dir, repo: repo, nxt: nxt, version: version, sha: sha)
-      ensure_release_pr(repo: repo, version: version)
+
+      begin
+        ensure_bump_pr(dir: dir, repo: repo, nxt: nxt, version: version, sha: sha)
+      rescue Github::ApiError, Github::CommandError => e
+        loud_warning("#{repo}: bump PR step failed: #{e.message}")
+      end
+
+      begin
+        ensure_release_pr(repo: repo, version: version)
+      rescue Github::ApiError, Github::CommandError => e
+        loud_warning("#{repo}: release PR step failed: #{e.message}")
+      end
 
       Success(:ok)
     end

@@ -169,7 +169,7 @@ jobs:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           BUILD_NUMBER: ${{ steps.fastlane.outputs.build-number }}
         run: |
-          nix run github:xmtplabs/convos-releases#train -- append-rc \
+          nix run github:xmtplabs/convos-releases#train --option access-tokens "github.com=$GH_TOKEN" -- append-rc \
             --repo "$GITHUB_REPOSITORY" --sha "$GITHUB_SHA" \
             --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --key build-number --value "${BUILD_NUMBER:?lane did not publish build-number}"

@@ -75,8 +75,10 @@ platform :android do
     end
 
     # Surface the chosen versionCode to the workflow (train manifest
-    # recording); no-op outside GitHub Actions.
-    if ENV["GITHUB_OUTPUT"]
+    # recording); no-op outside GitHub Actions. .to_s.empty? guards against
+    # an exported-but-empty GITHUB_OUTPUT, which would otherwise crash
+    # File.open("").
+    unless ENV["GITHUB_OUTPUT"].to_s.empty?
       File.open(ENV["GITHUB_OUTPUT"], "a") { |f| f.puts "version-code=#{version_code}" }
     end
 

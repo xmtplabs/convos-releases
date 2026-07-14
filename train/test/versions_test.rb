@@ -59,6 +59,12 @@ class VersionsTest < Minitest::Test
     assert_raises(Train::Versions::Error) { Train::Versions.read(@dir) }
   end
 
+  def test_read_rejects_bad_version_format
+    android_fixture(version: "foo")
+    error = assert_raises(Train::Versions::Error) { Train::Versions.read(@dir) }
+    assert_match(/bad version 'foo'/, error.message)
+  end
+
   def test_bump_android
     android_fixture(version: "2.1.0")
     Train::Versions.bump(@dir, "2.2.0")
