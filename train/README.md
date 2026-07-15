@@ -21,7 +21,9 @@ The weekly cut. Decides whether it is cut time (15:45 America/New_York on
 the `cut-day` from `release-config.yml`, minus `skip-dates`), recovers
 in-flight trains, captures one dev SHA per app repo, commits the manifest +
 seeded release notes first, then ensures per repo: `release/x.y.z` branch,
-version-bump PR to dev (auto-merge), release PR to main.
+version-bump PR to dev (auto-merge), release PR to main. Seeded notes cover
+PRs merged to dev since the previous train's cut date (from the manifests;
+7-day window only for the first-ever cut).
 
 - `--dry-run` — print the full plan (versions, SHAs, branches, PRs); mutate
   nothing.
@@ -42,8 +44,9 @@ The train version is derived from `GITHUB_REF_NAME` (`release/X` /
 ### `train seed-notes --repo OWNER/NAME [--since YYYY-MM-DD]`
 
 Prints seeded release notes to stdout: PRs merged to dev since `--since`
-(default: last 7 days), grouped Features / Fixes / Other by title prefix,
-bot authors excluded.
+(default when omitted: last 7 days — this manual subcommand has no
+manifest to derive a cut date from), grouped Features / Fixes / Other by
+title prefix, bot authors excluded.
 
 ### `train bump-version (read|bump) DIR [NEW_VERSION]`
 

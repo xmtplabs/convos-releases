@@ -62,7 +62,7 @@ module Train
 
         mdir = File.join(@releases_dir, "releases", version)
         mfile = File.join(mdir, "manifest.yml")
-        sha = yield init_or_reconcile_manifest(mfile: mfile, mdir: mdir, version: version, today: today, sha: sha, work: work)
+        sha = yield init_or_reconcile_manifest(mfile: mfile, mdir: mdir, version: version, today: today, sha: sha)
 
         # Persist whatever statuses ensure_all_repos wrote to the manifest
         # (e.g. one repo's "branched") UNCONDITIONALLY — even when the other
@@ -177,7 +177,7 @@ module Train
     # init_or_reconcile_manifest: once-per-version claim / reconcile mode.
     # Returns the per-repo sha map to use for the rest of the pipeline
     # (freshly captured on init, recorded-in-manifest on reconcile).
-    def init_or_reconcile_manifest(mfile:, mdir:, version:, today:, sha:, work:)
+    def init_or_reconcile_manifest(mfile:, mdir:, version:, today:, sha:)
       if File.exist?(mfile)
         @out.puts "Manifest exists — reconcile mode."
         data = Manifest.read(mfile)
@@ -187,7 +187,7 @@ module Train
 
       FileUtils.mkdir_p(mdir)
       Manifest.init(mfile, version: version, kind: "release", cut_date: today, repos: sha.slice(*REPOS))
-      write_seed_notes(mdir: mdir, version: version, work: work)
+      write_seed_notes(mdir: mdir, version: version)
 
       @gh.git_config_bot(@releases_dir)
       @gh.add(@releases_dir, mdir)
@@ -199,19 +199,40 @@ module Train
       Success(sha)
     end
 
-    def write_seed_notes(mdir:, version:, work:)
-      last_ios_tag = @gh.tags(File.join(work, "convos-ios"), "v*").first
-      last_cli_tag = @gh.tags(File.join(work, "convos-client"), "v*").first
-      since_ios = last_ios_tag ? @gh.commit_date(File.join(work, "convos-ios"), last_ios_tag) : ""
-      since_cli = last_cli_tag ? @gh.commit_date(File.join(work, "convos-client"), last_cli_tag) : ""
+    def write_seed_notes(mdir:, version:)
+      since = previous_cut_date(excluding: version)
 
-      File.write(File.join(mdir, "ios.md"), seed_notes("xmtplabs/convos-ios", since_ios))
-      android_notes = seed_notes("xmtplabs/convos-client", since_cli)
+      File.write(File.join(mdir, "ios.md"), seed_notes("xmtplabs/convos-ios", since))
+      android_notes = seed_notes("xmtplabs/convos-client", since)
       File.write(File.join(mdir, "android.md"), android_notes)
       submission = +"# Submission notes for #{version}\n\n"
       submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n\n"
       submission << android_notes
       File.write(File.join(mdir, "submission-notes.md"), submission)
+    end
+
+    # previous_cut_date: the notes-seeding boundary for BOTH repos is the
+    # previous train's cut date, not a tag/commit lookup — tags don't exist
+    # until Phase-2 promotion ships, so deriving `since` from them would
+    # always fall back to seed-notes' 7-day window and a skipped week would
+    # silently lose changelog entries. Scans every manifest EXCEPT the one
+    # for the version currently being cut (it was just written by
+    # Manifest.init, moments before this runs, and would otherwise win as
+    # its own "most recent" prior manifest). Manifests with top-level
+    # status "abandoned" are excluded from consideration — an abandoned
+    # train's cut-date isn't a real boundary. Returns nil (seed-notes' own
+    # 7-day fallback applies) when no qualifying prior manifest exists —
+    # i.e. only for the first-ever cut.
+    def previous_cut_date(excluding:)
+      dates = Dir.glob(File.join(@releases_dir, "releases", "*", "manifest.yml")).filter_map do |mf|
+        next if File.dirname(mf) == File.join(@releases_dir, "releases", excluding)
+
+        data = Manifest.read(mf)
+        next if data["status"] == "abandoned"
+
+        data["cut-date"]
+      end
+      dates.max
     end
 
     # ensure_all_repos: runs each repo's ensure steps independently and

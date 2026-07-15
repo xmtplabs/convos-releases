@@ -83,16 +83,6 @@ module Train
       run!(["git", "-C", dir, "checkout", "--quiet", ref])
     end
 
-    def tags(dir, pattern)
-      out, = run!(["git", "-C", dir, "tag", "--list", pattern, "--sort=-creatordate"])
-      out.split("\n").map(&:strip).reject(&:empty?)
-    end
-
-    def commit_date(dir, ref)
-      out, = run!(["git", "-C", dir, "log", "-1", "--format=%cs", ref])
-      out.strip
-    end
-
     # pr_list: PRs matching repo/head/base/state, normalized to plain
     # string-keyed Hashes (number, url) — same shape callers got from `gh
     # pr list --json number,url`, regardless of Octokit's Sawyer::Resource
@@ -207,14 +197,24 @@ module Train
       end
     end
 
-    # pr_merge_auto: enable GitHub's native auto-merge (squash) on a PR.
-    # The REST API has no endpoint for this — it's GraphQL-only
+    # MERGE_METHODS: tried in order by pr_merge_auto. Some repos (e.g.
+    # convos-client) disallow squash merges, in which case GitHub's GraphQL
+    # API rejects mergeMethod:SQUASH with a "not allowed" error rather than
+    # falling back itself — so pr_merge_auto walks this list until one
+    # method is accepted.
+    MERGE_METHODS = %w[SQUASH MERGE REBASE].freeze
+
+    # pr_merge_auto: enable GitHub's native auto-merge on a PR. The REST API
+    # has no endpoint for this — it's GraphQL-only
     # (enablePullRequestAutoMerge), which needs the PR's GraphQL node id.
     # head_or_number may be a branch name (freshly created PR) or a PR
     # number (re-arming on an existing open PR) — resolve to the PR object
-    # either way to get node_id.
+    # either way to get node_id. Tries MERGE_METHODS in order: a "not
+    # allowed" GraphQL error (the repo forbids that merge method) advances
+    # to the next method; any other error is treated as final (current
+    # warn+false behavior).
     def pr_merge_auto(repo:, head_or_number:)
-      mutate!("enable auto-merge (squash) #{repo}##{head_or_number}", default: true) do
+      mutate!("enable auto-merge #{repo}##{head_or_number}", default: true) do
         pr = if head_or_number.is_a?(Integer) || head_or_number.to_s.match?(/\A\d+\z/)
           api! { client.pull_request(repo, head_or_number.to_i) }
         else
@@ -226,33 +226,59 @@ module Train
           next false
         end
 
-        begin
-          mutation = {
-            query: <<~GQL,
-              mutation($pullRequestId: ID!) {
-                enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: SQUASH }) {
-                  pullRequest { id }
-                }
-              }
-            GQL
-            variables: { pullRequestId: pr[:node_id] }
-          }.to_json
-          response = api! { client.post "/graphql", mutation }
-          errors = response[:errors]
-          if errors && !errors.empty?
-            @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number}: #{errors.map { |e| e[:message] }.join("; ")}"
-            false
-          else
-            true
-          end
-        rescue ApiError => e
-          @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number}: #{e.message}"
-          false
-        end
+        try_merge_methods(repo: repo, head_or_number: head_or_number, node_id: pr[:node_id])
       end
     end
 
     private
+
+    # try_merge_methods: attempts enablePullRequestAutoMerge with each of
+    # MERGE_METHODS in turn. A GraphQL error matching /not allowed/i (the
+    # repo forbids that merge method — e.g. squash disabled) tries the next
+    # method; any other error is final. Returns true on the first accepted
+    # method, false (with a warning naming every attempted method) if all
+    # are rejected.
+    def try_merge_methods(repo:, head_or_number:, node_id:)
+      attempted = []
+      last_message = nil
+      MERGE_METHODS.each do |method|
+        attempted << method
+        errors = attempt_auto_merge(node_id: node_id, method: method)
+        return true if errors.nil?
+
+        last_message = errors.map { |e| e[:message] }.join("; ")
+        next if last_message.match?(/not allowed/i)
+
+        @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number} (#{method}): #{last_message}"
+        return false
+      rescue ApiError => e
+        @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number} (#{method}): #{e.message}"
+        return false
+      end
+
+      @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number} (tried #{attempted.join(", ")}): #{last_message}"
+      false
+    end
+
+    # attempt_auto_merge: posts the GraphQL mutation for one merge method.
+    # Returns nil on success, or the GraphQL errors array on failure (empty
+    # response[:errors] is normalized to nil so callers can `return true if
+    # errors.nil?`).
+    def attempt_auto_merge(node_id:, method:)
+      mutation = {
+        query: <<~GQL,
+          mutation($pullRequestId: ID!) {
+            enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: #{method} }) {
+              pullRequest { id }
+            }
+          }
+        GQL
+        variables: { pullRequestId: node_id }
+      }.to_json
+      response = api! { client.post "/graphql", mutation }
+      errors = response[:errors]
+      errors && !errors.empty? ? errors : nil
+    end
 
     def client
       require "octokit"
