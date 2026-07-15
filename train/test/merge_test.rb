@@ -193,6 +193,27 @@ class MergeTest < Minitest::Test
     assert_match(/#{Regexp.escape(IOS)}: already merged/, @out.string)
   end
 
+  def test_older_merged_pr_does_not_mask_an_abandoned_respin
+    # release/<v> PR #5 merged then reverted; the respun PR #15 was closed
+    # without merging and nothing is open — "already merged" would be a
+    # lie, so this must be the hard no-PR failure.
+    stub_manifest
+    @gh.stub_pr_list(repo: IOS, head: "release/#{VERSION}", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(
+      repo: IOS, head: "release/#{VERSION}", base: "main", state: "all",
+      result: [
+        { "number" => 5, "url" => "https://x/5", "merged_at" => "2026-07-14T00:00:00Z" },
+        { "number" => 15, "url" => "https://x/15", "merged_at" => nil }
+      ]
+    )
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/no release PR for #{VERSION} on #{Regexp.escape(IOS)}/, result.failure)
+  end
+
   # ---- no PR anywhere ----
 
   def test_no_pr_anywhere_for_the_version_fails_naming_the_repo

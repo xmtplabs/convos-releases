@@ -142,16 +142,18 @@ module Train
 
     # find_pr: looks for an OPEN <kind>/<version> PR (kind is "release" or
     # "hotfix", from the manifest — no blind fallback between the two),
-    # returning [number, head-sha]. If not open, checks state "all" — an
-    # already-merged PR is a success-note, not a failure; truly
-    # nonexistent is the only hard failure.
+    # returning [number, head-sha]. If not open, the LATEST PR for the
+    # head decides: merged means this repo is already done (a rerun);
+    # closed-unmerged means a respun release was abandoned — an OLDER
+    # merged PR is no proof the current one landed, so that falls through
+    # to the hard failure like a truly nonexistent PR.
     def find_pr(repo:, version:, kind:)
       head = "#{kind}/#{version}"
       open_pr = @gh.pr_list(repo: repo, head: head, base: "main", state: "open").first
       return Success([open_pr.fetch("number"), open_pr["head-sha"]]) if open_pr
 
-      merged_pr = @gh.pr_list(repo: repo, head: head, base: "main", state: "all").find { |pr| pr["merged_at"] }
-      return Success(:already_merged) if merged_pr
+      latest = @gh.pr_list(repo: repo, head: head, base: "main", state: "all").max_by { |pr| pr["number"] }
+      return Success(:already_merged) if latest && latest["merged_at"]
 
       Failure("no release PR for #{version} on #{repo}")
     end
