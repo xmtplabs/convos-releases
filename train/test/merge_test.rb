@@ -23,23 +23,35 @@ class MergeTest < Minitest::Test
 
   # stub_manifest: registers the convos-releases clone fixture read by
   # Merge#read_manifest — a manifest at `version` with the given `kind` and
-  # `repos` (keys become the participating repos).
-  def stub_manifest(gh = @gh, version: VERSION, kind: "release", repos: [IOS, CLIENT])
+  # `repos` (keys become the participating repos). Each repo gets an rc
+  # entry for "tip-<repo>" (matching stub_open_release_pr's head-sha) so
+  # the RC-presence gate passes by default; override per-repo with `rc:`
+  # (repo => sha, nil for no rc entry at all).
+  def stub_manifest(gh = @gh, version: VERSION, kind: "release", repos: [IOS, CLIENT], rc: {})
     gh.stub_clone("convos-releases") do |dest|
       mdir = File.join(dest, "releases", version)
       FileUtils.mkdir_p(mdir)
+      mfile = File.join(mdir, "manifest.yml")
       Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: version, kind: kind, cut_date: "2026-07-16",
+        mfile, version: version, kind: kind, cut_date: "2026-07-16",
         repos: repos.to_h { |r| [r, "sha-#{r}"] }
       )
+      data = Train::Manifest.read(mfile)
+      repos.each do |r|
+        sha = rc.key?(r) ? rc[r] : "tip-#{r}"
+        data["repos"][r]["rc"] = [{ "sha" => sha, "build-number" => 1, "run" => "https://run/1" }] if sha
+      end
+      Train::Manifest.write(mfile, data)
     end
   end
 
   # stub_open_release_pr: the common happy-path fixture — an open
-  # release/<version> PR on `repo` with the given number.
+  # release/<version> PR on `repo` with the given number, whose tip is
+  # "tip-<repo>" (the sha stub_manifest records an rc for).
   def stub_open_release_pr(repo, number, version: VERSION)
     @gh.stub_pr_list(repo: repo, head: "release/#{version}", base: "main", state: "open",
-                      result: [{ "number" => number, "url" => "https://x/#{number}", "merged_at" => nil }])
+                      result: [{ "number" => number, "url" => "https://x/#{number}", "merged_at" => nil,
+                                 "head-sha" => "tip-#{repo}" }])
   end
 
   def stub_no_release_pr_anywhere(repo, version: VERSION)
@@ -115,7 +127,7 @@ class MergeTest < Minitest::Test
   def test_single_repo_manifest_only_attempts_that_repo
     stub_manifest(kind: "hotfix", repos: [IOS])
     @gh.stub_pr_list(repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
-                      result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil }])
+                      result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil, "head-sha" => "tip-#{IOS}" }])
 
     result = new_merge.run(version: VERSION, actor: "octocat")
 
@@ -196,11 +208,11 @@ class MergeTest < Minitest::Test
     stub_manifest(kind: "hotfix")
     @gh.stub_pr_list(
       repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
-      result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil }]
+      result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil, "head-sha" => "tip-#{IOS}" }]
     )
     @gh.stub_pr_list(
       repo: CLIENT, head: "hotfix/#{VERSION}", base: "main", state: "open",
-      result: [{ "number" => 31, "url" => "https://x/31", "merged_at" => nil }]
+      result: [{ "number" => 31, "url" => "https://x/31", "merged_at" => nil, "head-sha" => "tip-#{CLIENT}" }]
     )
 
     result = new_merge.run(version: VERSION, actor: "octocat")
@@ -228,6 +240,51 @@ class MergeTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/no release PR for #{VERSION} on #{Regexp.escape(IOS)}/, result.failure)
     refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }
+  end
+
+  # ---- RC-presence gate: no merge without an uploaded RC for the tip ----
+
+  def test_no_rc_for_tip_blocks_that_repo_but_not_the_other
+    stub_manifest(rc: { IOS => nil })
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/#{Regexp.escape(IOS)}: no RC recorded for tip tip-#{Regexp.escape(IOS)}/, result.failure)
+    refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }, "an un-RC'd tip must not be merged"
+    assert @gh.calls_for(:pr_merge).any? { |c| c.args[0] == CLIENT }, "the RC'd repo must still merge"
+  end
+
+  def test_stale_rc_for_an_older_tip_blocks_the_merge
+    # RC recorded for an EARLIER push; a later commit moved the tip and its
+    # upload hasn't finished.
+    stub_manifest(rc: { IOS => "older-tip-sha" })
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/no RC recorded for tip tip-#{Regexp.escape(IOS)}/, result.failure)
+    refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }
+  end
+
+  def test_already_merged_repo_skips_the_rc_gate
+    # The gate protects the merge decision — a PR that's already merged
+    # has nothing left to gate (promotion does its own RC lookup).
+    stub_manifest(rc: { IOS => nil })
+    @gh.stub_pr_list(repo: IOS, head: "release/#{VERSION}", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(
+      repo: IOS, head: "release/#{VERSION}", base: "main", state: "all",
+      result: [{ "number" => 5, "url" => "https://x/5", "merged_at" => "2026-07-15T00:00:00Z" }]
+    )
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_equal Dry::Monads::Success(:ok), result
   end
 
   # ---- API errors fold into Results, never crash the run ----
@@ -273,9 +330,9 @@ class MergeTest < Minitest::Test
     gh = FakeGithub.new(dry_run: true)
     stub_manifest(gh)
     gh.stub_pr_list(repo: IOS, head: "release/#{VERSION}", base: "main", state: "open",
-                     result: [{ "number" => 10, "url" => "https://x/10", "merged_at" => nil }])
+                     result: [{ "number" => 10, "url" => "https://x/10", "merged_at" => nil, "head-sha" => "tip-#{IOS}" }])
     gh.stub_pr_list(repo: CLIENT, head: "release/#{VERSION}", base: "main", state: "open",
-                     result: [{ "number" => 20, "url" => "https://x/20", "merged_at" => nil }])
+                     result: [{ "number" => 20, "url" => "https://x/20", "merged_at" => nil, "head-sha" => "tip-#{CLIENT}" }])
 
     result = new_merge(gh).run(version: VERSION, actor: "octocat")
 

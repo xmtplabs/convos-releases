@@ -5,6 +5,7 @@ require "tmpdir"
 require "dry/monads"
 require_relative "manifest"
 require_relative "versions"
+require_relative "notes"
 require_relative "github"
 require_relative "cut"
 require_relative "config"
@@ -206,7 +207,7 @@ module Train
     # here (same pencil-edit flow as regular release notes).
     def write_seed_notes(mdir:, repos:, base_tag:)
       template = +"# Hotfix from #{base_tag}\n\n"
-      template << "_Describe the fix being shipped; this file becomes the store release notes._\n"
+      template << "_#{Notes::HOTFIX_PLACEHOLDER}; this file becomes the store release notes._\n"
 
       repos.each do |repo|
         name = repo.end_with?("convos-ios") ? "ios.md" : "android.md"
@@ -246,11 +247,12 @@ module Train
     # the captured sha, so a later ls_remote can compare directly), this
     # branch's tip is the freshly-created bump COMMIT on top of the tag's
     # sha — there's no recorded "expected tip" to compare a rerun's
-    # ls_remote against. An existing ref is instead verified by ANCESTRY:
-    # its tip must contain the captured tag sha (true for our own bump
-    # commit and any cherry-picks since). A tip that doesn't is a
-    # pre-existing/foreign branch — proceeding would open a PR that could
-    # release code unrelated to the tag. Unlike Cut's release-PR step,
+    # ls_remote against. An existing ref is instead sanity-checked by
+    # ANCESTRY: its tip must contain the captured tag sha (true for our
+    # own bump commit and any cherry-picks since). This catches a branch
+    # pointing at unrelated history, though not every foreign branch — a
+    # tip cut from main after the release merge also contains the tag.
+    # Unlike Cut's release-PR step,
     # PR creation here is NOT best-effort — a dispatch-triggered hotfix has
     # a human watching, so a failure here must fail the whole repo loud
     # rather than silently leave no PR. An already-open PR is a no-op note;
@@ -281,7 +283,7 @@ module Train
         @out.puts "#{repo}: created #{branch} @ #{sha}"
       else
         unless @gh.ancestor?(dir, sha, existing)
-          return Failure("#{branch} exists but its tip #{existing} does not contain #{sha} — pre-existing or foreign branch; inspect it before rerunning")
+          return Failure("#{branch} exists but #{sha} was not confirmed reachable from its tip #{existing} — a pre-existing/foreign branch, or the tip landed after this run's clone (re-dispatching re-checks against a fresh clone); inspect before proceeding")
         end
 
         @out.puts "#{repo}: #{branch} exists"

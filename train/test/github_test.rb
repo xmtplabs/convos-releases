@@ -114,6 +114,28 @@ class FakeOctokitClient
     @posts << { url: url, body: body }
     @graphql_results_queue.empty? ? @graphql_result : @graphql_results_queue.shift
   end
+
+  # stub_branch: result may be a branch-ish value, :not_found (raises real
+  # Octokit::NotFound, as the live API does for a deleted branch), or
+  # :error (raises Octokit::InternalServerError). Unstubbed lookups raise
+  # NotFound, mirroring the API.
+  def stub_branch(repo:, branch:, result:)
+    (@branches ||= {})[[repo, branch]] = result
+  end
+
+  def branch(repo, name, _options = {})
+    result = (@branches || {}).fetch([repo, name], :not_found)
+    raise Octokit::NotFound if result == :not_found
+    raise Octokit::InternalServerError if result == :error
+
+    result
+  end
+
+  attr_reader :last_create_ref
+
+  def create_ref(repo, ref, sha)
+    @last_create_ref = { repo: repo, ref: ref, sha: sha }
+  end
 end
 
 class GithubTest < Minitest::Test
@@ -183,7 +205,7 @@ class GithubTest < Minitest::Test
 
     result = gh.pr_list(repo: "o/r", head: "bot/bump-1.2.0", state: "all")
 
-    assert_equal [{ "number" => 42, "url" => "https://github.com/o/r/pull/42", "merged_at" => nil }], result
+    assert_equal [{ "number" => 42, "url" => "https://github.com/o/r/pull/42", "merged_at" => nil, "head-sha" => nil }], result
   end
 
   def test_pr_list_empty_when_no_match
@@ -386,19 +408,87 @@ class GithubTest < Minitest::Test
     assert_equal "write", gh.collaborator_permission("o/r", "octocat")
   end
 
-  # ---- pr_list: merged_at is surfaced for Merge#find_pr ----
+  # ---- pr_list: merged_at + head-sha are surfaced for Merge/Promote ----
 
-  def test_pr_list_surfaces_merged_at
+  def test_pr_list_surfaces_merged_at_and_head_sha
     client = FakeOctokitClient.new
     client.stub_pull_requests(
       repo: "o/r", head: "o:release/1.0.0", state: "all",
-      result: [{ number: 5, html_url: "x", merged_at: "2026-07-15T00:00:00Z" }]
+      result: [{ number: 5, html_url: "x", merged_at: "2026-07-15T00:00:00Z", head: { sha: "tip-abc" } }]
     )
     gh = Train::Github.new(client: client)
 
     result = gh.pr_list(repo: "o/r", head: "release/1.0.0", state: "all")
 
     assert_equal "2026-07-15T00:00:00Z", result.first["merged_at"]
+    assert_equal "tip-abc", result.first["head-sha"]
+  end
+
+  # ---- ancestor?: merge-base exit-code mapping ----
+
+  # stub_git_status: like stub_git_output but with a controllable exit
+  # status — ancestor?'s whole subtlety is the exit-code mapping (0 = yes;
+  # 1 = no; >1 = error e.g. unknown rev, also treated as "not confirmed").
+  def stub_git_status(gh, ok)
+    gh.define_singleton_method(:run) { |_args| ["", "", FakeOkStatus.new(ok)] }
+  end
+
+  def test_ancestor_true_on_exit_zero
+    gh = Train::Github.new
+    stub_git_status(gh, true)
+
+    assert gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
+  end
+
+  def test_ancestor_false_on_any_nonzero_exit
+    gh = Train::Github.new
+    stub_git_status(gh, false)
+
+    refute gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
+  end
+
+  # ---- branch_exists?: rescue ordering (same bug class as release_exists?) ----
+
+  def test_branch_exists_false_when_absent
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    refute gh.branch_exists?("o/r", "hotfix/1.0.1")
+  end
+
+  def test_branch_exists_true_when_present
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "hotfix/1.0.1", result: { name: "hotfix/1.0.1" })
+    gh = Train::Github.new(client: client)
+
+    assert gh.branch_exists?("o/r", "hotfix/1.0.1")
+  end
+
+  def test_branch_exists_wraps_non_404_errors_in_api_error
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "hotfix/1.0.1", result: :error)
+    gh = Train::Github.new(client: client)
+
+    assert_raises(Train::Github::ApiError) { gh.branch_exists?("o/r", "hotfix/1.0.1") }
+  end
+
+  # ---- create_ref ----
+
+  def test_create_ref_posts_heads_ref
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
+
+    assert_equal({ repo: "o/r", ref: "heads/hotfix/1.0.1", sha: "tip-abc" }, client.last_create_ref)
+  end
+
+  def test_create_ref_gated_under_dry_run
+    gh = Train::Github.new(dry_run: true, out: @out)
+
+    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
+
+    assert_match(/\[dry-run\] create_ref/, @out.string)
   end
 
   # ---- pr_merge ----

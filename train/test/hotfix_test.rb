@@ -200,9 +200,14 @@ class HotfixTest < Minitest::Test
     result = new_hotfix.run(base_tag: BASE_TAG)
 
     assert_instance_of Dry::Monads::Result::Failure, result
-    assert_match(/hotfix\/#{VERSION} exists but its tip foreign-tip does not contain ios-tag-sha/, result.failure)
+    assert_match(/hotfix\/#{VERSION} exists but ios-tag-sha was not confirmed reachable from its tip foreign-tip/, result.failure)
     ios_pr_creates = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == IOS }
     assert_empty ios_pr_creates, "a foreign branch must not get a PR opened for it"
+
+    # Pin argument order — "is the TAG SHA an ancestor of the TIP", never
+    # the reverse (the fake ignores the args, so this is the only guard).
+    call = @gh.calls_for(:ancestor?).first
+    assert_equal %w[ios-tag-sha foreign-tip], call.args[1..2]
   end
 
   def test_versions_error_is_a_per_repo_failure_not_a_crash

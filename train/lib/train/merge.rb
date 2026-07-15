@@ -58,7 +58,7 @@ module Train
         return Failure("version must look like X.Y.Z, got '#{version}'")
       end
 
-      repos, kind = yield read_manifest(version)
+      repos, kind, rc_shas = yield read_manifest(version)
 
       # Phase 1: gate EVERY repo before merging anything.
       permissions = repos.to_h { |repo| [repo, check_permission(repo: repo, actor: actor)] }
@@ -70,7 +70,7 @@ module Train
       # Phase 2: merge each repo (the version's manifest "kind" decides the
       # branch-name prefix — release/<version> or hotfix/<version> — no
       # blind fallback between the two).
-      outcomes = repos.to_h { |repo| [repo, merge_repo(repo: repo, version: version, kind: kind)] }
+      outcomes = repos.to_h { |repo| [repo, merge_repo(repo: repo, version: version, kind: kind, rc_shas: rc_shas[repo] || [])] }
 
       outcomes.each { |repo, result| @out.puts "#{repo}: #{describe(result)}" }
 
@@ -101,7 +101,9 @@ module Train
         return Failure("no manifest for #{version}") unless File.exist?(mfile)
 
         data = Manifest.read(mfile)
-        Success([data.fetch("repos", {}).keys, data.fetch("kind")])
+        repos = data.fetch("repos", {})
+        rc_shas = repos.transform_values { |info| (info["rc"] || []).map { |e| e["sha"] } }
+        Success([repos.keys, data.fetch("kind"), rc_shas])
       ensure
         FileUtils.remove_entry(dir) if Dir.exist?(dir)
       end
@@ -112,16 +114,25 @@ module Train
     end
 
     # merge_repo: one repo's merge sequence (permission already gated in
-    # Phase 1) — find the PR for this version's kind-prefixed branch, then
-    # merge it. Wrapped in its own Result — including a rescue for API
-    # errors raised by the PR lookup — so nothing here ever
-    # short-circuits the OTHER repo's attempt (run() collects both
-    # regardless of outcome).
-    def merge_repo(repo:, version:, kind:)
-      pr_number = yield find_pr(repo: repo, version: version, kind: kind)
-      return Success("already merged") if pr_number == :already_merged
+    # Phase 1) — find the PR for this version's kind-prefixed branch,
+    # check the manifest recorded an RC for its tip, then merge it.
+    # Wrapped in its own Result — including a rescue for API errors raised
+    # by the PR lookup — so nothing here ever short-circuits the OTHER
+    # repo's attempt (run() collects both regardless of outcome).
+    def merge_repo(repo:, version:, kind:, rc_shas:)
+      found = yield find_pr(repo: repo, version: version, kind: kind)
+      return Success("already merged") if found == :already_merged
 
-      merge_pr(repo: repo, number: pr_number)
+      number, head_sha = found
+
+      # RC gate: merging a tip whose RC upload hasn't completed (or
+      # failed) advances main with nothing promotable — promotion would
+      # only discover it afterwards, at find_rc_entry.
+      unless rc_shas.include?(head_sha)
+        return Failure("no RC recorded for tip #{head_sha} — wait for the RC upload to finish (or check its run), then retry")
+      end
+
+      merge_pr(repo: repo, number: number)
     rescue Github::ApiError => e
       Failure(e.message)
     end
@@ -139,13 +150,14 @@ module Train
     end
 
     # find_pr: looks for an OPEN <kind>/<version> PR (kind is "release" or
-    # "hotfix", from the manifest — no blind fallback between the two). If
-    # not open, checks state "all" — an already-merged PR is a success-note,
-    # not a failure; truly nonexistent is the only hard failure.
+    # "hotfix", from the manifest — no blind fallback between the two),
+    # returning [number, head-sha]. If not open, checks state "all" — an
+    # already-merged PR is a success-note, not a failure; truly
+    # nonexistent is the only hard failure.
     def find_pr(repo:, version:, kind:)
       head = "#{kind}/#{version}"
       open_pr = @gh.pr_list(repo: repo, head: head, base: "main", state: "open").first
-      return Success(open_pr.fetch("number")) if open_pr
+      return Success([open_pr.fetch("number"), open_pr["head-sha"]]) if open_pr
 
       merged_pr = @gh.pr_list(repo: repo, head: head, base: "main", state: "all").find { |pr| pr["merged_at"] }
       return Success(:already_merged) if merged_pr

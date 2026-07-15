@@ -7,6 +7,11 @@ module Train
   # label-based filtering is deliberately absent (a dependencies PR can fix
   # a user-visible crash — humans prune, automation doesn't hide).
   module Notes
+    # HOTFIX_PLACEHOLDER: the marker sentence Hotfix seeds into platform
+    # notes files. Promote#prepare refuses to stage notes that still
+    # contain it — the seeded template must never reach a store listing.
+    HOTFIX_PLACEHOLDER = "Describe the fix being shipped"
+
     module_function
 
     # default_since: 7-day fallback when no explicit --since / prior

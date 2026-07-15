@@ -7,6 +7,7 @@ require_relative "manifest"
 require_relative "state_writer"
 require_relative "github"
 require_relative "versions"
+require_relative "notes"
 
 module Train
   # Ports the "Promote" step of the release train: given a merged release
@@ -45,10 +46,15 @@ module Train
         yield assert_key_matches_platform(repo: repo, key: key)
 
         yield assert_trees_match(app_dir: app_dir, merge_sha: merge_sha, head_sha: head_sha)
-        yield ensure_tag(app_dir: app_dir, version: version, merge_sha: merge_sha)
 
+        # Notes staged (and checked) BEFORE the tag push — unedited
+        # placeholder notes should stop promotion while nothing has been
+        # mutated yet, not after the tag is already claimed.
         notes_dir = File.join(app_dir, ".train-promote")
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
+        yield assert_notes_edited(repo: repo, version: version, notes_dir: notes_dir)
+
+        yield ensure_tag(app_dir: app_dir, version: version, merge_sha: merge_sha)
 
         emit_outputs(
           key: key, value: value, version: version, notes_sha: notes_sha, notes_dir: notes_dir
@@ -180,9 +186,18 @@ module Train
     # credentials, etc.) now returns Failure and must abort `record` before
     # the manifest is ever written. Only the two expected "already handled"
     # outcomes above are downgraded to a printed note + Success.
+    #
+    # The branch is restored first if absent: delete-branch-on-merge
+    # (enabled on convos-ios) removes hotfix/<version> the moment its main
+    # PR merges, and a PR can't be opened from a deleted head — without the
+    # restore, promotion would wedge permanently (no rerun brings the
+    # branch back).
     def open_hotfix_back_merge_pr(repo:, version:)
+      branch = "hotfix/#{version}"
+      yield restore_branch_if_deleted(repo: repo, branch: branch)
+
       @gh.pr_create(
-        repo: repo, base: "dev", head: "hotfix/#{version}",
+        repo: repo, base: "dev", head: branch,
         title: "Back-merge hotfix #{version} into dev",
         body: "Automated back-merge of hotfix/#{version} into dev. Conflicts? Resolve them here manually."
       )
@@ -194,6 +209,22 @@ module Train
       end
 
       Failure("hotfix back-merge PR failed for #{repo}: #{e.message}")
+    end
+
+    # restore_branch_if_deleted: recreate hotfix/<version> at the merged
+    # PR's recorded head sha. The merged PR is the authoritative source for
+    # where the branch pointed — the tag is the MERGE commit, not the tip.
+    def restore_branch_if_deleted(repo:, branch:)
+      return Success(:ok) if @gh.branch_exists?(repo, branch)
+
+      merged = @gh.pr_list(repo: repo, head: branch, base: "main", state: "all").find { |pr| pr["merged_at"] }
+      unless merged && merged["head-sha"]
+        return Failure("#{branch} is gone on #{repo} and no merged PR records its head sha — restore the branch manually, then re-run")
+      end
+
+      @gh.create_ref(repo, branch: branch, sha: merged["head-sha"])
+      @out.puts "#{repo}: restored #{branch} @ #{merged["head-sha"]} (deleted on merge)"
+      Success(:ok)
     end
 
     NOTES_BY_REPO_SUFFIX = {
@@ -321,6 +352,22 @@ module Train
         @out.puts "#{tag}: already tagged"
       else
         return Failure("tag #{tag} exists at #{existing}, expected #{merge_sha}")
+      end
+
+      Success(:ok)
+    end
+
+    # assert_notes_edited: a hotfix seeds its platform notes as a
+    # describe-the-fix TEMPLATE (see Hotfix#write_seed_notes) — if the
+    # marker sentence is still present at promote time, nobody edited them,
+    # and staging would send the placeholder to the store listing.
+    def assert_notes_edited(repo:, version:, notes_dir:)
+      suffix = NOTES_BY_REPO_SUFFIX.keys.find { |s| repo.end_with?(s) }
+      notes_file = suffix && File.join(notes_dir, NOTES_BY_REPO_SUFFIX[suffix])
+      return Success(:ok) unless notes_file && File.exist?(notes_file)
+
+      if File.read(notes_file).include?(Notes::HOTFIX_PLACEHOLDER)
+        return Failure("releases/#{version}/#{NOTES_BY_REPO_SUFFIX[suffix]} still contains the seeded placeholder — describe the fix (pencil-edit on convos-releases main), then re-run promotion")
       end
 
       Success(:ok)

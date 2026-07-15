@@ -136,7 +136,12 @@ module Train
       options[:head] = "#{repo.split("/").first}:#{head}" if head
       options[:base] = base if base
       api! { client.pull_requests(repo, options) }
-        .map { |pr| { "number" => pr[:number], "url" => pr[:html_url], "merged_at" => pr[:merged_at] } }
+        .map do |pr|
+          {
+            "number" => pr[:number], "url" => pr[:html_url], "merged_at" => pr[:merged_at],
+            "head-sha" => pr.dig(:head, :sha)
+          }
+        end
     end
 
     # merged_prs_since: raw PR data (number, title, author.is_bot) for
@@ -187,6 +192,27 @@ module Train
       false
     rescue Octokit::Error => e
       raise ApiError.new("release_for_tag(#{repo}, #{tag}): #{e.message}", cause: e)
+    end
+
+    # branch_exists?: whether refs/heads/<branch> currently exists on the
+    # repo. Read-only; same raw-client + rescue-ordering shape as
+    # release_exists? (api! would swallow the NotFound we branch on).
+    def branch_exists?(repo, branch)
+      client.branch(repo, branch)
+      true
+    rescue Octokit::NotFound
+      false
+    rescue Octokit::Error => e
+      raise ApiError.new("branch(#{repo}, #{branch}): #{e.message}", cause: e)
+    end
+
+    # create_ref: creates refs/heads/<branch> at `sha` — used to restore a
+    # branch that GitHub's delete-branch-on-merge removed when a later step
+    # (the hotfix back-merge PR) still needs it as a PR head.
+    def create_ref(repo, branch:, sha:)
+      mutate!("create_ref #{repo} #{branch} @ #{sha}") do
+        api! { client.create_ref(repo, "heads/#{branch}", sha) }
+      end
     end
 
     # dirty?: true if `path` (relative to dir) has uncommitted changes.

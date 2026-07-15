@@ -137,6 +137,12 @@ class FakeGithub
     (@pr_list_failures ||= {})[repo] = message
   end
 
+  # stub_branch_missing: scripts branch_exists?(repo, branch) to return
+  # false — tests default to true (the branch survived its PR's merge).
+  def stub_branch_missing(repo, branch)
+    (@missing_branches ||= {})[[repo, branch]] = true
+  end
+
   # ---- Github interface ----
 
   def ls_remote(dir, ref)
@@ -283,6 +289,21 @@ class FakeGithub
   def release_exists?(repo, tag)
     record(:release_exists?, [repo, tag])
     @releases[[repo, tag]] || false
+  end
+
+  # branch_exists?: read-only; defaults to true unless scripted via
+  # stub_branch_missing. create_ref flips it back to true so an
+  # ensure-state restore-then-recheck converges like the real seam.
+  def branch_exists?(repo, branch)
+    record(:branch_exists?, [repo, branch])
+    !(@missing_branches || {})[[repo, branch]]
+  end
+
+  def create_ref(repo, branch:, sha:)
+    record(:create_ref, [repo], { branch: branch, sha: sha })
+    return if @dry_run
+
+    (@missing_branches || {}).delete([repo, branch])
   end
 
   def create_release(repo, tag:, name:, body:)

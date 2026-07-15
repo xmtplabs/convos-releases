@@ -110,6 +110,33 @@ class PromoteTest < Minitest::Test
     assert File.exist?(File.join(notes_dir, "ios.md"))
   end
 
+  def test_prepare_blocks_unedited_hotfix_placeholder_notes
+    # A hotfix seeds platform notes as a template; promoting without
+    # pencil-editing them must fail BEFORE the tag is pushed.
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "hotfix", cut_date: "2026-07-16",
+        repos: { REPO => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+
+      File.write(File.join(mdir, "ios.md"), "# Hotfix from v2.0.9\n\n_#{Train::Notes::HOTFIX_PLACEHOLDER}; edit me._\n")
+      File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
+    end
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/ios\.md still contains the seeded placeholder/, result.failure)
+    refute @gh.called?(:push), "placeholder notes must stop promotion before the tag is pushed"
+  end
+
   def test_prepare_writes_github_output_when_set
     write_manifest_fixture
     stub_matching_trees
@@ -561,6 +588,39 @@ class PromoteTest < Minitest::Test
     assert_match(/simulated back-merge API failure/, result.failure)
     refute @gh.called?(:push), "a hard back-merge failure must abort before any manifest push"
     refute @gh.called?(:commit), "a hard back-merge failure must abort before any manifest commit"
+  end
+
+  # ---- back-merge: branch restored when delete-on-merge removed it ----
+
+  def test_record_restores_deleted_hotfix_branch_before_back_merge
+    stub_releases_clone_with_kind("hotfix")
+    @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
+    @gh.stub_pr_list(
+      repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
+      result: [{ "number" => 40, "url" => "https://x/40", "merged_at" => "2026-07-15T00:00:00Z",
+                 "head-sha" => "hotfix-tip-sha" }]
+    )
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    restore = @gh.calls_for(:create_ref).first
+    refute_nil restore, "the deleted branch must be recreated before the back-merge PR"
+    assert_equal "hotfix/#{VERSION}", restore.kwargs[:branch]
+    assert_equal "hotfix-tip-sha", restore.kwargs[:sha]
+    assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
+  end
+
+  def test_record_fails_loud_when_deleted_branch_cannot_be_restored
+    stub_releases_clone_with_kind("hotfix")
+    @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
+    @gh.stub_pr_list(repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all", result: [])
+
+    result = new_promote.record(**record_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/restore the branch manually/, result.failure)
+    refute @gh.called?(:commit), "an unrestorable back-merge must abort before any manifest write"
   end
 
   # ---- back-merge tolerances: rerun-safe outcomes still succeed ----
