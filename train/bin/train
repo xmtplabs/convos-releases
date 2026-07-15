@@ -126,11 +126,11 @@ end
 def cmd_promote_record(argv)
   opts = {
     dry_run: false, repo: nil, version: nil, tag: nil, key: nil, value: nil,
-    notes_sha: nil, run: nil, pr: nil, app_dir: Dir.pwd
+    notes_sha: nil, run: nil, kind: nil, pr: nil, app_dir: Dir.pwd
   }
   OptionParser.new do |o|
     o.banner = "Usage: train promote record --repo OWNER/NAME --version X.Y.Z --tag vX.Y.Z --key K --value N " \
-               "--notes-sha S --run URL [--pr N] [--app-dir DIR] [--dry-run]"
+               "--notes-sha S --run URL --kind (release|hotfix) [--pr N] [--app-dir DIR] [--dry-run]"
     o.on("--repo REPO") { |v| opts[:repo] = v }
     o.on("--version VERSION") { |v| opts[:version] = v }
     o.on("--tag TAG") { |v| opts[:tag] = v }
@@ -138,23 +138,27 @@ def cmd_promote_record(argv)
     o.on("--value N") { |v| opts[:value] = v }
     o.on("--notes-sha SHA") { |v| opts[:notes_sha] = v }
     o.on("--run URL") { |v| opts[:run] = v }
+    o.on("--kind KIND") { |v| opts[:kind] = v }
     o.on("--pr N", Integer) { |v| opts[:pr] = v }
     o.on("--app-dir DIR") { |v| opts[:app_dir] = v }
     o.on("--dry-run") { opts[:dry_run] = true }
   end.parse!(argv)
 
-  %i[repo version tag key value notes_sha run].each do |k|
+  %i[repo version tag key value notes_sha run kind].each do |k|
     fail_loud("promote record: --#{k.to_s.tr("_", "-")} is required") unless opts[k]
   end
   unless %w[version-code build-number].include?(opts[:key])
     fail_loud("promote record: --key must be version-code or build-number, got '#{opts[:key]}'")
+  end
+  unless %w[release hotfix].include?(opts[:kind])
+    fail_loud("promote record: --kind must be release or hotfix, got '#{opts[:kind]}'")
   end
 
   github = Train::Github.new(dry_run: opts[:dry_run])
   promote = Train::Promote.new(github: github)
   unwrap_result(promote.record(
     repo: opts[:repo], version: opts[:version], tag: opts[:tag], key: opts[:key], value: opts[:value],
-    notes_sha: opts[:notes_sha], run_url: opts[:run], pr_number: opts[:pr], app_dir: opts[:app_dir]
+    notes_sha: opts[:notes_sha], run_url: opts[:run], kind: opts[:kind], pr_number: opts[:pr], app_dir: opts[:app_dir]
   ))
 end
 

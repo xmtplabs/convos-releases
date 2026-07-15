@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "fileutils"
 require "dry/monads"
 require "train/merge"
+require "train/manifest"
 require_relative "support/fake_github"
 
 class MergeTest < Minitest::Test
@@ -19,6 +21,20 @@ class MergeTest < Minitest::Test
     Train::Merge.new(github: gh, out: @out)
   end
 
+  # stub_manifest: registers the convos-releases clone fixture read by
+  # Merge#read_manifest — a manifest at `version` with the given `kind` and
+  # `repos` (keys become the participating repos).
+  def stub_manifest(gh = @gh, version: VERSION, kind: "release", repos: [IOS, CLIENT])
+    gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", version)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: version, kind: kind, cut_date: "2026-07-16",
+        repos: repos.to_h { |r| [r, "sha-#{r}"] }
+      )
+    end
+  end
+
   # stub_open_release_pr: the common happy-path fixture — an open
   # release/<version> PR on `repo` with the given number.
   def stub_open_release_pr(repo, number, version: VERSION)
@@ -29,11 +45,10 @@ class MergeTest < Minitest::Test
   def stub_no_release_pr_anywhere(repo, version: VERSION)
     @gh.stub_pr_list(repo: repo, head: "release/#{version}", base: "main", state: "open", result: [])
     @gh.stub_pr_list(repo: repo, head: "release/#{version}", base: "main", state: "all", result: [])
-    @gh.stub_pr_list(repo: repo, head: "hotfix/#{version}", base: "main", state: "open", result: [])
-    @gh.stub_pr_list(repo: repo, head: "hotfix/#{version}", base: "main", state: "all", result: [])
   end
 
   def both_repos_have_open_release_prs
+    stub_manifest
     stub_open_release_pr(IOS, 10)
     stub_open_release_pr(CLIENT, 20)
   end
@@ -73,25 +88,60 @@ class MergeTest < Minitest::Test
     assert_equal [CLIENT, "octocat"], perm_calls.find { |c| c.args[0] == CLIENT }.args
   end
 
-  # ---- permission denial: other repo still attempted ----
+  # ---- no manifest for version ----
 
-  def test_read_only_on_one_repo_fails_that_repo_but_still_attempts_the_other
+  def test_no_manifest_for_version_is_a_failure
+    @gh.stub_clone("convos-releases") { |dest| FileUtils.mkdir_p(File.join(dest, "releases")) }
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/no manifest for #{VERSION}/, result.failure)
+    refute @gh.called?(:collaborator_permission), "must not even check permissions without a manifest"
+  end
+
+  # ---- manifest-scoped repos: single-platform hotfix ----
+
+  def test_single_repo_manifest_only_attempts_that_repo
+    stub_manifest(kind: "hotfix", repos: [IOS])
+    @gh.stub_pr_list(repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
+                      result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil }])
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_equal Dry::Monads::Success(:ok), result
+    assert_equal 1, @gh.calls_for(:collaborator_permission).size
+    assert_equal 1, @gh.calls_for(:pr_merge).size
+    ios_call = @gh.calls_for(:pr_merge).first
+    assert_equal IOS, ios_call.args[0]
+    assert_equal 30, ios_call.args[1]
+  end
+
+  # ---- permission denial: two-phase gate blocks ALL merges ----
+
+  def test_read_only_on_one_repo_fails_that_repo_and_blocks_the_other_from_merging
+    stub_manifest
     @gh.stub_permission(IOS, "read")
-    both_repos_have_open_release_prs
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
 
     result = new_merge.run(version: VERSION, actor: "someone")
 
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/#{Regexp.escape(IOS)}.*lacks write.*got read/, result.failure)
 
-    # the other repo's merge must still have been attempted
-    assert @gh.calls_for(:pr_merge).any? { |c| c.args[0] == CLIENT }
-    refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }, "permission-denied repo must not be merged"
+    # two-phase gate: BOTH repos' permissions are checked before anything
+    # merges, but a failure on either means ZERO merges are attempted
+    # anywhere — not even on the repo whose permission passed.
+    assert_equal 2, @gh.calls_for(:collaborator_permission).size
+    assert_empty @gh.calls_for(:pr_merge), "no merge may be attempted when any repo's permission gate fails"
   end
 
   def test_permission_denial_message_format
+    stub_manifest
     @gh.stub_permission(IOS, "triage")
-    both_repos_have_open_release_prs
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
 
     result = new_merge.run(version: VERSION, actor: "bob")
 
@@ -101,6 +151,7 @@ class MergeTest < Minitest::Test
   # ---- already merged ----
 
   def test_one_repo_already_merged_other_merges_overall_success
+    stub_manifest
     @gh.stub_pr_list(repo: IOS, head: "release/#{VERSION}", base: "main", state: "open", result: [])
     @gh.stub_pr_list(
       repo: IOS, head: "release/#{VERSION}", base: "main", state: "all",
@@ -119,6 +170,7 @@ class MergeTest < Minitest::Test
   # ---- no PR anywhere ----
 
   def test_no_pr_anywhere_for_the_version_fails_naming_the_repo
+    stub_manifest
     stub_no_release_pr_anywhere(IOS)
     stub_open_release_pr(CLIENT, 20)
 
@@ -128,23 +180,44 @@ class MergeTest < Minitest::Test
     assert_match(/no release PR for #{VERSION} on #{Regexp.escape(IOS)}/, result.failure)
   end
 
-  # ---- hotfix fallback ----
+  # ---- hotfix kind: branch prefix from manifest, no blind fallback ----
 
-  def test_hotfix_fallback_when_release_branch_pr_absent
-    @gh.stub_pr_list(repo: IOS, head: "release/2.1.1", base: "main", state: "open", result: [])
-    @gh.stub_pr_list(repo: IOS, head: "release/2.1.1", base: "main", state: "all", result: [])
+  def test_hotfix_kind_looks_for_hotfix_branch_only
+    stub_manifest(kind: "hotfix")
     @gh.stub_pr_list(
-      repo: IOS, head: "hotfix/2.1.1", base: "main", state: "open",
+      repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
       result: [{ "number" => 30, "url" => "https://x/30", "merged_at" => nil }]
     )
-    stub_open_release_pr(CLIENT, 20, version: "2.1.1")
+    @gh.stub_pr_list(
+      repo: CLIENT, head: "hotfix/#{VERSION}", base: "main", state: "open",
+      result: [{ "number" => 31, "url" => "https://x/31", "merged_at" => nil }]
+    )
 
-    result = new_merge.run(version: "2.1.1", actor: "octocat")
+    result = new_merge.run(version: VERSION, actor: "octocat")
 
     assert_equal Dry::Monads::Success(:ok), result
     ios_call = @gh.calls_for(:pr_merge).find { |c| c.args[0] == IOS }
     assert_equal 30, ios_call.args[1]
     assert_match(/#{Regexp.escape(IOS)}: merged #30/, @out.string)
+  end
+
+  def test_release_kind_does_not_fall_back_to_hotfix_branch
+    # A release-kind manifest must not accidentally match a hotfix/<version>
+    # PR left over from an unrelated branch — no blind fallback between the
+    # two kinds anymore.
+    stub_manifest(kind: "release")
+    stub_no_release_pr_anywhere(IOS)
+    @gh.stub_pr_list(
+      repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
+      result: [{ "number" => 99, "url" => "https://x/99", "merged_at" => nil }]
+    )
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/no release PR for #{VERSION} on #{Regexp.escape(IOS)}/, result.failure)
+    refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }
   end
 
   # ---- merge API failure ----
@@ -164,6 +237,7 @@ class MergeTest < Minitest::Test
 
   def test_dry_run_runs_permission_and_lookup_but_does_not_actually_merge
     gh = FakeGithub.new(dry_run: true)
+    stub_manifest(gh)
     gh.stub_pr_list(repo: IOS, head: "release/#{VERSION}", base: "main", state: "open",
                      result: [{ "number" => 10, "url" => "https://x/10", "merged_at" => nil }])
     gh.stub_pr_list(repo: CLIENT, head: "release/#{VERSION}", base: "main", state: "open",

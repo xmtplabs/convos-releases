@@ -145,20 +145,70 @@ class HotfixTest < Minitest::Test
     refute @gh.called?(:clone)
   end
 
-  # ---- existing manifest ----
+  # ---- existing manifest: reconcile mode ----
 
-  def test_existing_manifest_is_a_failure
+  def existing_manifest(kind: "hotfix", repos: { IOS => "ios-tag-sha", ANDROID => "android-tag-sha" })
     mdir = File.join(@releases_dir, "releases", VERSION)
     FileUtils.mkdir_p(mdir)
     Train::Manifest.init(
-      File.join(mdir, "manifest.yml"), version: VERSION, kind: "hotfix", cut_date: "2026-07-10",
-      repos: { IOS => "existing-sha", ANDROID => "existing-sha" }
+      File.join(mdir, "manifest.yml"), version: VERSION, kind: kind, cut_date: "2026-07-10",
+      repos: repos
     )
+  end
+
+  def test_kind_release_manifest_at_same_version_is_a_failure
+    existing_manifest(kind: "release")
 
     result = new_hotfix.run(base_tag: BASE_TAG)
 
     assert_instance_of Dry::Monads::Result::Failure, result
-    assert_match(/manifest already exists for #{VERSION}/, result.failure)
+    assert_match(/manifest already exists for #{VERSION} with kind "release"/, result.failure)
+    refute @gh.called?(:checkout_branch), "a kind mismatch must not touch any repo"
+  end
+
+  def test_mismatched_source_sha_is_a_failure_naming_both
+    # manifest recorded a DIFFERENT sha than what the tag now resolves to —
+    # base_tag must have moved (a new tag pushed) between the first attempt
+    # and this rerun.
+    existing_manifest(repos: { IOS => "stale-ios-sha", ANDROID => "android-tag-sha" })
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/source-sha mismatch/, result.failure)
+    assert_match(/#{Regexp.escape(IOS)}: manifest has "stale-ios-sha", tag now resolves to "ios-tag-sha"/, result.failure)
+    refute @gh.called?(:checkout_branch), "a source-sha mismatch must not touch any repo"
+  end
+
+  def test_reconcile_mode_partial_failure_rerun_converges
+    existing_manifest
+    mdir = File.join(@releases_dir, "releases", VERSION)
+    # First attempt already got as far as pushing the ios branch + PR, but
+    # the android push failed (simulated) and left the repo's ensure
+    # incomplete — the manifest exists (status still whatever init left it
+    # at) but android's branch was never pushed.
+    @gh.stub_ls_remote("convos-ios", "refs/heads/hotfix/#{VERSION}", "ios-existing-branch-tip")
+    @gh.stub_pr_list(repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
+                      result: [{ "number" => 5, "url" => "https://x/5", "merged_at" => nil }])
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+
+    # ios already had its branch + open PR — no duplicate mutations.
+    ios_checkouts = @gh.calls_for(:checkout_branch).select { |c| c.args[0].end_with?("/convos-ios") }
+    assert_empty ios_checkouts, "ios branch already existed — must not be recreated"
+    ios_pr_creates = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == IOS }
+    assert_empty ios_pr_creates, "ios PR already open — must not be recreated"
+
+    # android converges: branch created, PR created.
+    android_checkouts = @gh.calls_for(:checkout_branch).select { |c| c.args[0].end_with?("/convos-client") }
+    assert_equal 1, android_checkouts.size
+    android_pr_creates = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == ANDROID }
+    assert_equal 1, android_pr_creates.size
+
+    data = Train::Manifest.read(manifest_file)
+    assert_equal "branched", data["repos"][ANDROID]["status"]
   end
 
   # ---- version arithmetic ----

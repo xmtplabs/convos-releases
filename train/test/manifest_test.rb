@@ -92,6 +92,28 @@ class ManifestTest < Minitest::Test
     assert_equal 2, rc.size
   end
 
+  def test_append_rc_after_promotion_keeps_status_promoted
+    # A late/stray RC upload (CI retry, manual rerun) landing after the repo
+    # was already promoted must still record the rc entry, but must NOT
+    # downgrade status back to "rc-available" — that would misrepresent an
+    # already-promoted repo as still awaiting promotion.
+    init_with_one_repo
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+
+    result = Train::Manifest.append_rc(
+      file, repo: "xmtplabs/convos-ios", sha: "abc123", run: "https://run/2", key: "build-number", value: "999"
+    )
+    assert_equal :appended, result
+
+    data = Train::Manifest.read(file)
+    repo = data["repos"]["xmtplabs/convos-ios"]
+    assert_equal "promoted", repo["status"], "a late RC append must not downgrade a promoted repo's status"
+    assert(repo["rc"].any? { |e| e["sha"] == "abc123" && e["build-number"] == 999 }, "the rc entry must still be recorded")
+  end
+
   def test_append_rc_rejects_non_integer_values
     init_with_one_repo
     ["", "abc", "4.21", "-1", "1a", " 1", "0", "000"].each do |bad|

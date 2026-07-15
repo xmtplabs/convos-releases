@@ -163,6 +163,7 @@ jobs:
             --key "${{ steps.prepare.outputs.artifact-key }}" \
             --value "${{ steps.prepare.outputs.artifact-value }}" \
             --notes-sha "${{ steps.prepare.outputs.notes-sha }}" \
-            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --kind "${{ steps.prepare.outputs.kind }}")
           [ -n "${{ inputs.pr-number }}" ] && args+=(--pr "${{ inputs.pr-number }}")
           train "${args[@]}"

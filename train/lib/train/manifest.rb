@@ -62,7 +62,13 @@ module Train
       end
 
       repo_data["rc"] << { "sha" => sha, "run" => run, key => int_value }
-      repo_data["status"] = "rc-available"
+      # Only advance status to "rc-available" if the repo hasn't already
+      # been promoted — a late/stray RC upload (CI retry, manual rerun)
+      # landing after promotion must still be RECORDED (the rc entry itself
+      # always appends) but must never downgrade "promoted" back to
+      # "rc-available"; that would misrepresent a promoted repo as still
+      # awaiting promotion.
+      repo_data["status"] = "rc-available" unless repo_data["status"] == "promoted"
       write(file, data)
       :appended
     end

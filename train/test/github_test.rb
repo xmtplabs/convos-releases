@@ -338,6 +338,44 @@ class GithubTest < Minitest::Test
     assert_includes client.posts[1][:body], "mergeMethod: MERGE"
   end
 
+  # ---- tag_sha: prefers the peeled (^{}) line for annotated tags ----
+
+  FakeOkStatus = Struct.new(:success?)
+  private_constant :FakeOkStatus
+
+  # stub_git_output: overrides Github#run (the private Open3.capture3 seam)
+  # on this instance to return canned (stdout, stderr, status) for the NEXT
+  # call, regardless of args — enough to test tag_sha's line-parsing logic
+  # without a real git subprocess or remote.
+  def stub_git_output(gh, stdout)
+    gh.define_singleton_method(:run) { |_args| [stdout, "", FakeOkStatus.new(true)] }
+  end
+
+  def test_tag_sha_prefers_peeled_sha_for_annotated_tags
+    gh = Train::Github.new
+    # ls-remote for an ANNOTATED tag returns two lines: the tag object's own
+    # sha, then a second "^{}" line with the commit sha it points at.
+    stub_git_output(gh, "tag-object-sha\trefs/tags/v2.1.0\ncommit-sha-abc\trefs/tags/v2.1.0^{}\n")
+
+    assert_equal "commit-sha-abc", gh.tag_sha("/tmp/dir", "v2.1.0")
+  end
+
+  def test_tag_sha_falls_back_to_plain_sha_for_lightweight_tags
+    gh = Train::Github.new
+    # A LIGHTWEIGHT tag has no object of its own — ls-remote returns just
+    # one line, already the commit sha, no ^{} line.
+    stub_git_output(gh, "commit-sha-xyz\trefs/tags/v2.1.0\n")
+
+    assert_equal "commit-sha-xyz", gh.tag_sha("/tmp/dir", "v2.1.0")
+  end
+
+  def test_tag_sha_empty_when_tag_absent
+    gh = Train::Github.new
+    stub_git_output(gh, "")
+
+    assert_equal "", gh.tag_sha("/tmp/dir", "v9.9.9")
+  end
+
   # ---- collaborator_permission ----
 
   def test_collaborator_permission_returns_the_permission_string

@@ -131,6 +131,36 @@ platform :ios do
       submission_information: { add_id_info_uses_idfa: false },
       app_review_information: { notes: review_notes_text },
     )
+
+    # deliver's own build-selection (Deliver::SubmitForReview#select_build)
+    # only runs inside submit_for_review's path (submit_for_review.rb) — with
+    # submit_for_review: false above, build_number is silently ignored and NO
+    # build gets attached to the edit version. Attach it explicitly here via
+    # the same Spaceship calls deliver's submit_for_review.rb uses (its
+    # setup_app_store_connect_api_key call already configured the ConnectAPI
+    # token, so Spaceship::ConnectAPI is ready to use as-is). Idempotent:
+    # selecting the same build twice is a harmless PATCH.
+    app = Spaceship::ConnectAPI::App.find(PROD_BUNDLE_ID)
+    UI.user_error!("could not find app #{PROD_BUNDLE_ID} in App Store Connect") unless app
+
+    version = app.get_edit_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+    UI.user_error!("no editable App Store version found for #{PROD_BUNDLE_ID}") unless version
+    unless version.version_string == train_version
+      UI.user_error!("editable App Store version is #{version.version_string}, expected #{train_version}")
+    end
+
+    build = Spaceship::ConnectAPI::Build.all(
+      app_id: app.id,
+      version: train_version,
+      build_number: train_build_number,
+      platform: Spaceship::ConnectAPI::Platform::IOS,
+    ).first
+    unless build
+      UI.user_error!("build #{train_build_number} not found/processed for #{train_version}")
+    end
+
+    version.select_build(build_id: build.id)
+    UI.success("Successfully attached build #{train_build_number} to App Store version #{train_version}")
   end
 
   # The provisioning profile name match installed for a bundle id, as published

@@ -26,6 +26,10 @@ on:
         description: "Cut a hotfix from this tag instead (vX.Y.Z); leave empty for a normal cut"
         type: string
         default: ""
+      hotfix-repo:
+        description: "optional single repo OWNER/NAME for a one-platform hotfix"
+        type: string
+        default: ""
 
 concurrency:
   group: release-train
@@ -73,10 +77,12 @@ jobs:
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
           TRAIN_HOTFIX_BASE_TAG: ${{ inputs.hotfix-base-tag || '' }}
+          TRAIN_HOTFIX_REPO: ${{ inputs.hotfix-repo || '' }}
         run: |
           if [ -n "$TRAIN_HOTFIX_BASE_TAG" ]; then
             args=(hotfix --base-tag "$TRAIN_HOTFIX_BASE_TAG")
             [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+            [ -n "$TRAIN_HOTFIX_REPO" ] && args+=(--repo "$TRAIN_HOTFIX_REPO")
           else
             args=(cut)
             [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")

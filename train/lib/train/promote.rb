@@ -36,8 +36,10 @@ module Train
         mfile = File.join(dir, "releases", version, "manifest.yml")
         return Failure("no manifest for #{version}") unless File.exist?(mfile)
 
-        rc = yield find_rc_entry(mfile, repo: repo, head_sha: head_sha)
+        manifest_data = Manifest.read(mfile)
+        rc = yield find_rc_entry(manifest_data, repo: repo, head_sha: head_sha)
         key, value = rc
+        yield assert_key_matches_platform(repo: repo, key: key)
 
         yield assert_trees_match(app_dir: app_dir, merge_sha: merge_sha, head_sha: head_sha)
         yield ensure_tag(app_dir: app_dir, version: version, merge_sha: merge_sha)
@@ -45,7 +47,10 @@ module Train
         notes_dir = File.join(app_dir, ".train-promote")
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
 
-        emit_outputs(key: key, value: value, version: version, notes_sha: notes_sha, notes_dir: notes_dir)
+        emit_outputs(
+          key: key, value: value, version: version, notes_sha: notes_sha, notes_dir: notes_dir,
+          kind: manifest_data.fetch("kind")
+        )
 
         Success(true)
       ensure
@@ -53,15 +58,20 @@ module Train
       end
     end
 
-    # record: the "Record promotion" step — writes the promoted block into
-    # convos-releases' manifest (via StateWriter, same retry semantics as
-    # Append), ensures a GitHub Release exists on the APP repo for `tag`
-    # (creating it from the platform notes staged by `prepare` if absent),
-    # and — when `pr_number` is given — posts a staged-submission summary
-    # comment on that PR. Returns a Result: Success(true) on completion
-    # (including dry-run and no-op writes), Failure(message) if the
-    # manifest write's retries are exhausted or fail hard.
-    def record(repo:, version:, tag:, key:, value:, notes_sha:, run_url:, pr_number: nil, app_dir: Dir.pwd)
+    # record: the "Record promotion" step — for a hotfix, FIRST opens the
+    # back-merge PR (hard-gated: a real API failure aborts before anything
+    # is written — see open_hotfix_back_merge_pr), THEN writes the promoted
+    # block into convos-releases' manifest (via StateWriter, same retry
+    # semantics as Append), ensures a GitHub Release exists on the APP repo
+    # for `tag` (creating it from the platform notes staged by `prepare` if
+    # absent), and — when `pr_number` is given — posts a staged-submission
+    # summary comment on that PR. `kind` ("release" or "hotfix") comes from
+    # the caller (prepare already read it off the manifest; threading it
+    # through a required flag avoids `record` needing its own clone just to
+    # learn this). Returns a Result: Success(true) on completion (including
+    # dry-run and no-op writes), Failure(message) if the back-merge hard-
+    # fails or the manifest write's retries are exhausted/fail hard.
+    def record(repo:, version:, tag:, key:, value:, notes_sha:, run_url:, kind:, pr_number: nil, app_dir: Dir.pwd)
       # Pre-validate BEFORE any I/O (mirrors Append#run): a bad artifact id
       # must fail fast as a Result, not surface as a Manifest::Error raised
       # from inside the StateWriter loop after a clone.
@@ -70,14 +80,19 @@ module Train
         return Failure("record: --value must be a positive integer, got '#{value_str}'")
       end
 
-      kind_holder = {}
-      yield record_promotion(repo: repo, version: version, key: key, value: value_str, tag: tag, notes_sha: notes_sha, run_url: run_url, kind_holder: kind_holder)
+      # Back-merge BEFORE the manifest write for a hotfix: a hard failure
+      # here (repo unreachable, auth failure, etc.) must leave the manifest
+      # untouched (no push) rather than recording a promotion whose
+      # back-merge never happened. "Already exists"/"no commits between"
+      # are expected on a rerun (the PR was already opened, or the branches
+      # are already level) and are tolerated as success-notes, not failures.
+      yield open_hotfix_back_merge_pr(repo: repo, version: version) if kind == "hotfix"
+
+      yield record_promotion(repo: repo, version: version, key: key, value: value_str, tag: tag, notes_sha: notes_sha, run_url: run_url)
 
       ensure_release(repo: repo, tag: tag, app_dir: app_dir)
 
       post_pr_comment(repo: repo, tag: tag, version: version, pr_number: pr_number) if pr_number
-
-      open_hotfix_back_merge_pr(repo: repo, version: version) if kind_holder[:kind] == "hotfix"
 
       Success(true)
     end
@@ -87,38 +102,47 @@ module Train
     # record_promotion: the StateWriter-backed clone/mutate/commit/push
     # loop, mutating the convos-releases clone via Manifest.record_promotion.
     # An unchanged (already-recorded) block is still a successful, no-op
-    # write — record_promotion's boolean return isn't surfaced up through
-    # the Result, only used for the commit message. StateWriter#write always
-    # returns Success(true) on its happy path (discarding whatever Success
-    # value the block itself produced), so the manifest's "kind" — needed by
-    # `record` afterward to decide whether to open a hotfix back-merge PR —
-    # is threaded out via `kind_holder` (mutated as a side effect) rather
-    # than through the Result. It already reads the manifest file here, so
-    # this avoids a second clone just to look up "kind".
-    def record_promotion(repo:, version:, key:, value:, tag:, notes_sha:, run_url:, kind_holder:)
+    # write.
+    def record_promotion(repo:, version:, key:, value:, tag:, notes_sha:, run_url:)
       @writer.write(message: "train: promoted #{repo}@#{tag}") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
         next Failure("no manifest for #{version}") unless File.exist?(mfile)
 
-        data = Manifest.read(mfile)
-        kind_holder[:kind] = data["kind"]
         Manifest.record_promotion(mfile, repo: repo, key: key, value: value, tag: tag, notes_sha: notes_sha, run: run_url)
         Success(true)
       end
     end
 
-    # open_hotfix_back_merge_pr: best-effort — a conflicting back-merge is
-    # expected and handled by a human on the PR itself, not by this tool, so
-    # only a hard API error (repo unreachable, auth failure, etc.) is
-    # swallowed here (warn, don't fail the overall `record`).
+    # TOLERATED_BACK_MERGE_ERRORS: substrings (matched case-insensitively)
+    # of a back-merge pr_create ApiError that mean "this already happened,
+    # not a real failure" — a rerun after record already opened the PR
+    # ("A pull request already exists for ..."), or the hotfix branch is
+    # already fully merged into dev with nothing left to back-merge ("No
+    # commits between dev and hotfix/...").
+    TOLERATED_BACK_MERGE_ERRORS = [
+      "a pull request already exists",
+      "no commits between"
+    ].freeze
+
+    # open_hotfix_back_merge_pr: hard-gated — unlike the old best-effort
+    # behavior, a genuine API failure (repo unreachable, auth failure, bad
+    # credentials, etc.) now returns Failure and must abort `record` before
+    # the manifest is ever written. Only the two expected "already handled"
+    # outcomes above are downgraded to a printed note + Success.
     def open_hotfix_back_merge_pr(repo:, version:)
       @gh.pr_create(
         repo: repo, base: "dev", head: "hotfix/#{version}",
         title: "Back-merge hotfix #{version} into dev",
         body: "Automated back-merge of hotfix/#{version} into dev. Conflicts? Resolve them here manually."
       )
+      Success(:ok)
     rescue Github::ApiError => e
-      @out.puts "train: warning: hotfix back-merge PR failed for #{repo}: #{e.message}"
+      if TOLERATED_BACK_MERGE_ERRORS.any? { |m| e.message.downcase.include?(m) }
+        @out.puts "train: back-merge for #{repo}@hotfix/#{version}: #{e.message} (tolerated)"
+        return Success(:ok)
+      end
+
+      Failure("hotfix back-merge PR failed for #{repo}: #{e.message}")
     end
 
     NOTES_BY_REPO_SUFFIX = {
@@ -174,9 +198,10 @@ module Train
     # find_rc_entry: the LAST rc entry recorded for head_sha wins — a rerun
     # that produced a new artifact id for the same sha appends rather than
     # replaces (see Manifest.append_rc), so the most recent entry is the one
-    # actually uploaded last.
-    def find_rc_entry(mfile, repo:, head_sha:)
-      data = Manifest.read(mfile)
+    # actually uploaded last. Takes the already-read manifest data (prepare
+    # reads it once, at the top of its clone block, and reuses it here AND
+    # for the "kind" output) rather than re-reading the file itself.
+    def find_rc_entry(data, repo:, head_sha:)
       rc_list = data.dig("repos", repo, "rc") || []
       entry = rc_list.select { |e| e["sha"] == head_sha }.last
       unless entry
@@ -185,6 +210,33 @@ module Train
 
       key = entry.key?("version-code") ? "version-code" : "build-number"
       Success([key, entry[key]])
+    end
+
+    # EXPECTED_KEY_BY_REPO_SUFFIX: the artifact-key each platform's RC
+    # entries are recorded under (Append#run / append-rc's --key,
+    # ultimately the app repo's own upload workflow) — convos-ios uploads
+    # TestFlight build numbers, convos-client uploads Play version codes.
+    EXPECTED_KEY_BY_REPO_SUFFIX = {
+      "convos-ios" => "build-number",
+      "convos-client" => "version-code"
+    }.freeze
+
+    # assert_key_matches_platform: guards against a manifest whose RC entry
+    # was recorded under the WRONG platform's key (e.g. a copy/paste error
+    # in an app repo's upload workflow, or --key passed to append-rc for the
+    # wrong repo) — proceeding would silently record and stage the wrong
+    # kind of build number for `repo`. An unrecognized repo suffix is not
+    # this check's problem (no expectation to violate); the platform-suffix
+    # tables elsewhere in this class already treat that as a "no match"
+    # no-op rather than an error.
+    def assert_key_matches_platform(repo:, key:)
+      expected = EXPECTED_KEY_BY_REPO_SUFFIX.keys.find { |suffix| repo.end_with?(suffix) }
+      return Success(:ok) unless expected
+
+      expected_key = EXPECTED_KEY_BY_REPO_SUFFIX[expected]
+      return Success(:ok) if key == expected_key
+
+      Failure("artifact key #{key} does not match #{repo} (expected #{expected_key})")
     end
 
     def assert_trees_match(app_dir:, merge_sha:, head_sha:)
@@ -235,13 +287,14 @@ module Train
       @gh.rev_parse(clone_dir)
     end
 
-    def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:)
+    def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:, kind:)
       outputs = {
         "artifact-key" => key,
         "artifact-value" => value,
         "tag" => "v#{version}",
         "notes-sha" => notes_sha,
-        "notes-dir" => File.expand_path(notes_dir)
+        "notes-dir" => File.expand_path(notes_dir),
+        "kind" => kind
       }
 
       lines = outputs.map { |k, v| "#{k}=#{v}" }

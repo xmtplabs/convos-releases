@@ -72,8 +72,22 @@ module Train
 
     # tag_sha: resolves refs/tags/<tag> on origin — "" if the tag doesn't
     # exist. Read-only (ls-remote), so it always executes, dry-run or not.
+    #
+    # Queries BOTH refs/tags/<tag> and its dereferenced form
+    # refs/tags/<tag>^{} in one ls-remote call: for an ANNOTATED tag (e.g.
+    # one created through GitHub's release UI, as opposed to `git tag` /
+    # `git push origin <sha>:refs/tags/<tag>`, which make lightweight tags),
+    # ls-remote returns TWO lines — the tag OBJECT's own sha, and a second
+    # "^{}" line with the COMMIT sha it points at. Promote#ensure_tag
+    # compares this against a commit sha (merge_sha), so the peeled ^{}
+    # line must win whenever present; only a lightweight tag (single line,
+    # no ^{} line) falls back to the plain sha.
     def tag_sha(dir, tag)
-      ls_remote(dir, "refs/tags/#{tag}")
+      out, = run!(%w[git] + ["-C", dir, "ls-remote", "origin", "refs/tags/#{tag}", "refs/tags/#{tag}^{}"])
+      lines = out.lines.map(&:strip).reject(&:empty?)
+      peeled = lines.find { |line| line.end_with?("^{}") }
+      chosen = peeled || lines.first
+      chosen.to_s.split("\t").first.to_s.strip
     end
 
     # latest_tag: the highest-sorting local tag matching `pattern` (e.g.

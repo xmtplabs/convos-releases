@@ -133,16 +133,67 @@ class PromoteTest < Minitest::Test
 
   # ---- version-code key variant ----
 
+  ANDROID_REPO = "xmtplabs/convos-client"
+
   def test_supports_version_code_key
+    # version-code is the convos-client (android) key — build_args below
+    # swaps `repo:` to match, since Fix 7's artifact-key/platform check
+    # would otherwise reject version-code recorded against convos-ios.
     write_manifest_fixture(rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }])
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { ANDROID_REPO => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][ANDROID_REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+    end
     stub_matching_trees
     @gh.stub_tag_sha("v#{VERSION}", "")
 
-    result = new_promote.prepare(**base_args)
+    result = new_promote.prepare(**base_args.merge(repo: ANDROID_REPO))
 
     assert_instance_of Dry::Monads::Result::Success, result
     assert_match(/artifact-key=version-code/, @out.string)
     assert_match(/artifact-value=77/, @out.string)
+  end
+
+  # ---- artifact-key / platform validation (Fix 7) ----
+
+  def test_ios_repo_with_version_code_key_is_a_failure
+    # xmtplabs/convos-ios's RC entry recorded under the WRONG platform's
+    # key (version-code is convos-client's) — must fail loud rather than
+    # silently staging the wrong kind of build identifier.
+    write_manifest_fixture(rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }])
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/artifact key version-code does not match #{Regexp.escape(REPO)} \(expected build-number\)/, result.failure)
+    refute @gh.called?(:push), "an artifact-key mismatch must fail before any tag push"
+  end
+
+  def test_android_repo_with_build_number_key_is_a_failure
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { ANDROID_REPO => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][ANDROID_REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+    end
+
+    result = new_promote.prepare(**base_args.merge(repo: ANDROID_REPO))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/artifact key build-number does not match #{Regexp.escape(ANDROID_REPO)} \(expected version-code\)/, result.failure)
+    refute @gh.called?(:push), "an artifact-key mismatch must fail before any tag push"
   end
 
   # ---- failure paths ----
@@ -237,7 +288,7 @@ class PromoteTest < Minitest::Test
   def record_args(overrides = {})
     {
       repo: REPO, version: VERSION, tag: "v#{VERSION}", key: "build-number", value: "421",
-      notes_sha: "notes-sha-1", run_url: "https://run/1", app_dir: @app_dir
+      notes_sha: "notes-sha-1", run_url: "https://run/1", kind: "release", app_dir: @app_dir
     }.merge(overrides)
   end
 
@@ -411,7 +462,7 @@ class PromoteTest < Minitest::Test
   def test_record_on_hotfix_manifest_opens_back_merge_pr_into_dev
     stub_releases_clone_with_kind("hotfix")
 
-    result = new_promote.record(**record_args)
+    result = new_promote.record(**record_args(kind: "hotfix"))
 
     assert_equal Dry::Monads::Success(true), result
     back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "hotfix/#{VERSION}" }
@@ -425,20 +476,48 @@ class PromoteTest < Minitest::Test
   def test_record_on_release_manifest_does_not_open_back_merge_pr
     stub_releases_clone_with_kind("release")
 
-    result = new_promote.record(**record_args)
+    result = new_promote.record(**record_args(kind: "release"))
 
     assert_equal Dry::Monads::Success(true), result
     refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" }, "release-kind manifest must not trigger a back-merge PR")
   end
 
-  def test_record_back_merge_api_error_warns_but_overall_record_still_succeeds
+  # back-merge now runs BEFORE the manifest write and is a HARD gate: a
+  # real API failure must fail `record` overall and leave the manifest
+  # untouched (no clone-mutate-commit-push ever happens).
+  def test_record_back_merge_api_error_is_a_hard_failure_with_no_manifest_write
     stub_releases_clone_with_kind("hotfix")
     @gh.fail_pr_create(REPO, message: "simulated back-merge API failure")
 
-    result = new_promote.record(**record_args)
+    result = new_promote.record(**record_args(kind: "hotfix"))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/back-merge.*#{Regexp.escape(REPO)}/i, result.failure)
+    assert_match(/simulated back-merge API failure/, result.failure)
+    refute @gh.called?(:push), "a hard back-merge failure must abort before any manifest push"
+    refute @gh.called?(:commit), "a hard back-merge failure must abort before any manifest commit"
+  end
+
+  # ---- back-merge tolerances: rerun-safe outcomes still succeed ----
+
+  def test_record_back_merge_already_exists_is_tolerated_as_success
+    stub_releases_clone_with_kind("hotfix")
+    @gh.fail_pr_create(REPO, message: "A pull request already exists for xmtplabs:hotfix/#{VERSION}.")
+
+    result = new_promote.record(**record_args(kind: "hotfix"))
 
     assert_equal Dry::Monads::Success(true), result
-    assert_match(/warning.*back-merge.*#{Regexp.escape(REPO)}/i, @out.string)
+    assert @gh.called?(:push), "a tolerated back-merge outcome must still let the manifest write proceed"
+  end
+
+  def test_record_back_merge_no_commits_between_is_tolerated_as_success
+    stub_releases_clone_with_kind("hotfix")
+    @gh.fail_pr_create(REPO, message: "No commits between dev and hotfix/#{VERSION}")
+
+    result = new_promote.record(**record_args(kind: "hotfix"))
+
+    assert_equal Dry::Monads::Success(true), result
+    assert @gh.called?(:push), "a tolerated back-merge outcome must still let the manifest write proceed"
   end
 
   private
