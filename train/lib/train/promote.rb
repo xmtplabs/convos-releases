@@ -6,6 +6,7 @@ require "dry/monads"
 require_relative "manifest"
 require_relative "state_writer"
 require_relative "github"
+require_relative "versions"
 
 module Train
   # Ports the "Promote" step of the release train: given a merged release
@@ -27,6 +28,8 @@ module Train
     # prepare: returns a Result — Success(true) (including under dry-run)
     # or Failure(message).
     def prepare(repo:, version:, merge_sha:, head_sha:, app_dir: Dir.pwd)
+      yield assert_version_format(version)
+
       dir = Dir.mktmpdir("train-promote-")
       begin
         @gh.clone(
@@ -75,10 +78,17 @@ module Train
       # Pre-validate BEFORE any I/O (mirrors Append#run): a bad artifact id
       # must fail fast as a Result, not surface as a Manifest::Error raised
       # from inside the StateWriter loop after a clone.
+      yield assert_version_format(version)
+
       value_str = value.to_s
       unless value_str.match?(Manifest::POSITIVE_INT_RE)
         return Failure("record: --value must be a positive integer, got '#{value_str}'")
       end
+
+      # Same key<->platform guard as prepare: record is also invocable
+      # directly (manual runs), where a mistyped --key would otherwise be
+      # written into the manifest under the wrong artifact field.
+      yield assert_key_matches_platform(repo: repo, key: key)
 
       # Back-merge BEFORE the manifest write for a hotfix: a hard failure
       # here (repo unreachable, auth failure, etc.) must leave the manifest
@@ -98,6 +108,15 @@ module Train
     end
 
     private
+
+    # assert_version_format: `version` arrives from a caller-resolved
+    # branch name and is used in file paths and refs — reject anything
+    # that isn't X.Y.Z before it touches either.
+    def assert_version_format(version)
+      return Success(:ok) if version.match?(Versions::VERSION_RE)
+
+      Failure("version must look like X.Y.Z, got '#{version}'")
+    end
 
     # record_promotion: the StateWriter-backed clone/mutate/commit/push
     # loop, mutating the convos-releases clone via Manifest.record_promotion.
@@ -277,7 +296,12 @@ module Train
 
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
 
+    # copy_notes: notes_dir is recreated from scratch — a leftover
+    # .train-promote from an earlier run (possible on manual/local reruns;
+    # CI checkouts are fresh) could otherwise contribute a stale file that
+    # the current release source no longer has.
     def copy_notes(clone_dir:, version:, notes_dir:)
+      FileUtils.rm_rf(notes_dir)
       FileUtils.mkdir_p(notes_dir)
       src_dir = File.join(clone_dir, "releases", version)
       NOTES_FILES.each do |name|

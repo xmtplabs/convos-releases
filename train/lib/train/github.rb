@@ -102,14 +102,14 @@ module Train
       out.lines.first.to_s.strip
     end
 
-    # commit_date: the author date (YYYY-MM-DD, local to the committer) of
-    # `ref`, mirroring `git log -1 --format=%cs`. Read-only, so it always
-    # executes, dry-run or not — Hotfix uses this to derive the notes-seed
-    # `since` boundary from the base tag's commit rather than a manifest
-    # cut-date (hotfixes don't have a prior manifest to derive from).
-    def commit_date(dir, ref)
-      out, = run!(["git", "-C", dir, "log", "-1", "--format=%cs", ref])
-      out.strip
+    # ancestor?: whether `ancestor` is reachable from `descendant` in the
+    # local clone. merge-base --is-ancestor exits 1 for "no" and other
+    # non-zero for errors (e.g. a sha the clone doesn't have) — both mean
+    # the caller can't trust the relationship, so any failure is false.
+    # Read-only, so it always executes, dry-run or not.
+    def ancestor?(dir, ancestor, descendant)
+      _out, _err, status = run(["git", "-C", dir, "merge-base", "--is-ancestor", ancestor, descendant])
+      status.success?
     end
 
     def clone(url, dest, depth: nil, filter: nil)

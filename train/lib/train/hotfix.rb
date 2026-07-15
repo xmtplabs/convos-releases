@@ -5,7 +5,6 @@ require "tmpdir"
 require "dry/monads"
 require_relative "manifest"
 require_relative "versions"
-require_relative "notes"
 require_relative "github"
 require_relative "cut"
 require_relative "config"
@@ -38,9 +37,17 @@ module Train
       @err = err
     end
 
+    # BASE_TAG_RE: exactly vX.Y.Z — anything looser either crashes the
+    # patch arithmetic (v2.1) or silently drops components (v2.1.0.5).
+    BASE_TAG_RE = /\Av\d+\.\d+\.\d+\z/
+
     # run: Success(:dry_run | :hotfixed) or Failure(message).
     def run(base_tag:, only_repo: nil)
       yield guard_ref
+      unless base_tag.match?(BASE_TAG_RE)
+        return Failure("--base-tag must look like vX.Y.Z, got '#{base_tag}'")
+      end
+
       repos = yield participating_repos(only_repo)
       set_bot_remote
 
@@ -67,7 +74,7 @@ module Train
         if File.exist?(mfile)
           sha = yield reconcile_manifest(mfile: mfile, version: version, repos: repos, sha: sha)
         else
-          yield init_manifest(mfile: mfile, mdir: mdir, version: version, today: today, repos: repos, sha: sha, captures: captures)
+          yield init_manifest(mfile: mfile, mdir: mdir, version: version, today: today, repos: repos, sha: sha, base_tag: base_tag)
         end
 
         result = branch_and_pr_all_repos(work: work, version: version, repos: repos, sha: sha)
@@ -111,9 +118,8 @@ module Train
 
     # capture_repos: clones each participating repo (blob:none — tag history
     # included), verifies base_tag is that repo's LATEST v* tag, and
-    # captures the tag's commit sha + commit date (the notes-seed `since`
-    # boundary). Any single repo's tag mismatch fails the whole run before
-    # any manifest/branch mutation happens elsewhere.
+    # captures the tag's commit sha. Any single repo's tag mismatch fails
+    # the whole run before any manifest/branch mutation happens elsewhere.
     def capture_repos(work:, repos:, base_tag:)
       captures = {}
       repos.each do |repo|
@@ -127,9 +133,8 @@ module Train
         # ^{commit} dereferences annotated tags (e.g. tags made in GitHub's
         # release UI) — plain rev-parse would return the tag OBJECT's sha.
         sha = @gh.rev_parse(dir, "#{base_tag}^{commit}")
-        date = @gh.commit_date(dir, base_tag)
-        @out.puts "#{repo}: #{base_tag} @ #{sha} (#{date})"
-        captures[repo] = { sha: sha, date: date }
+        @out.puts "#{repo}: #{base_tag} @ #{sha}"
+        captures[repo] = { sha: sha }
       end
       Success(captures)
     end
@@ -177,10 +182,10 @@ module Train
       Success(recorded)
     end
 
-    def init_manifest(mfile:, mdir:, version:, today:, repos:, sha:, captures:)
+    def init_manifest(mfile:, mdir:, version:, today:, repos:, sha:, base_tag:)
       FileUtils.mkdir_p(mdir)
       Manifest.init(mfile, version: version, kind: "hotfix", cut_date: today, repos: sha)
-      write_seed_notes(mdir: mdir, repos: repos, captures: captures)
+      write_seed_notes(mdir: mdir, repos: repos, base_tag: base_tag)
 
       @gh.git_config_bot(@releases_dir)
       @gh.add(@releases_dir, mdir)
@@ -192,40 +197,25 @@ module Train
       Success(:ok)
     end
 
-    # write_seed_notes: seeds notes per participating platform file (ios.md
-    # for convos-ios, android.md for convos-client), since each repo's own
-    # base-tag commit date — NOT a shared boundary, since a hotfix on one
-    # platform only might be based on a tag cut at a different time than the
-    # other's. submission-notes.md is written from whichever platform file
-    # exists (android's, if both/neither — matching Cut's own preference for
-    # android_notes as the submission body), so --repo filtering to iOS only
-    # still produces a submission-notes.md.
-    def write_seed_notes(mdir:, repos:, captures:)
-      ios_notes = nil
-      android_notes = nil
+    # write_seed_notes: seeds a describe-the-fix TEMPLATE per participating
+    # platform file (ios.md for convos-ios, android.md for convos-client),
+    # not PR-derived notes like Cut — at cut time the hotfix branch is just
+    # the base tag plus a bump commit, and dev PRs merged since that tag are
+    # NOT on the branch, so seeding from them would describe changes the
+    # hotfix doesn't contain. The human cherry-picking the fix describes it
+    # here (same pencil-edit flow as regular release notes).
+    def write_seed_notes(mdir:, repos:, base_tag:)
+      template = +"# Hotfix from #{base_tag}\n\n"
+      template << "_Describe the fix being shipped; this file becomes the store release notes._\n"
 
       repos.each do |repo|
-        since = captures[repo][:date]
-        notes = seed_notes(repo, since)
-        if repo.end_with?("convos-ios")
-          ios_notes = notes
-          File.write(File.join(mdir, "ios.md"), notes)
-        else
-          android_notes = notes
-          File.write(File.join(mdir, "android.md"), notes)
-        end
+        name = repo.end_with?("convos-ios") ? "ios.md" : "android.md"
+        File.write(File.join(mdir, name), template)
       end
 
-      submission_source = android_notes || ios_notes || ""
-      submission = +"# Submission notes for hotfix\n\n"
-      submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n\n"
-      submission << submission_source
+      submission = +"# Submission notes for hotfix from #{base_tag}\n\n"
+      submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n"
       File.write(File.join(mdir, "submission-notes.md"), submission)
-    end
-
-    def seed_notes(repo, since)
-      prs = @gh.merged_prs_since(repo, since)
-      Notes.format(prs)
     end
 
     # branch_and_pr_all_repos: runs each repo's branch+PR steps independently
@@ -256,11 +246,11 @@ module Train
     # the captured sha, so a later ls_remote can compare directly), this
     # branch's tip is the freshly-created bump COMMIT on top of the tag's
     # sha — there's no recorded "expected tip" to compare a rerun's
-    # ls_remote against, so "the ref already exists at all" is treated as
-    # "this repo's branch step already completed" (a no-op note) rather
-    # than diffed against `sha`; the branch name itself
-    # (hotfix/<version>, unique per version, created only by this method)
-    # is what makes that a safe enough signal. Unlike Cut's release-PR step,
+    # ls_remote against. An existing ref is instead verified by ANCESTRY:
+    # its tip must contain the captured tag sha (true for our own bump
+    # commit and any cherry-picks since). A tip that doesn't is a
+    # pre-existing/foreign branch — proceeding would open a PR that could
+    # release code unrelated to the tag. Unlike Cut's release-PR step,
     # PR creation here is NOT best-effort — a dispatch-triggered hotfix has
     # a human watching, so a failure here must fail the whole repo loud
     # rather than silently leave no PR. An already-open PR is a no-op note;
@@ -274,7 +264,7 @@ module Train
       ensure_hotfix_pr(repo: repo, branch: branch, version: version)
 
       Success(:ok)
-    rescue Github::ApiError, Github::CommandError => e
+    rescue Github::ApiError, Github::CommandError, Versions::Error => e
       Failure("#{e.class}: #{e.message}")
     end
 
@@ -290,6 +280,10 @@ module Train
         end
         @out.puts "#{repo}: created #{branch} @ #{sha}"
       else
+        unless @gh.ancestor?(dir, sha, existing)
+          return Failure("#{branch} exists but its tip #{existing} does not contain #{sha} — pre-existing or foreign branch; inspect it before rerunning")
+        end
+
         @out.puts "#{repo}: #{branch} exists"
       end
       Success(:ok)

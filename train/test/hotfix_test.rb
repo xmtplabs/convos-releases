@@ -33,8 +33,6 @@ class HotfixTest < Minitest::Test
     @gh.stub_latest_tag("convos-client", latest_tag)
     @gh.stub_rev_parse("convos-ios", "#{BASE_TAG}^{commit}", "ios-tag-sha")
     @gh.stub_rev_parse("convos-client", "#{BASE_TAG}^{commit}", "android-tag-sha")
-    @gh.stub_commit_date("convos-ios", BASE_TAG, "2026-07-01")
-    @gh.stub_commit_date("convos-client", BASE_TAG, "2026-07-02")
   end
 
   def write_android_fixture(dest, version)
@@ -92,14 +90,26 @@ class HotfixTest < Minitest::Test
     pr_bases = @gh.calls_for(:pr_create).map { |c| c.kwargs[:base] }
     assert(pr_bases.all? { |b| b == "main" })
 
-    # notes seeded with since = tag commit date, per repo.
-    since_by_repo = @gh.calls_for(:merged_prs_since).to_h { |c| [c.args[0], c.args[1]] }
-    assert_equal "2026-07-01", since_by_repo[IOS]
-    assert_equal "2026-07-02", since_by_repo[ANDROID]
-
-    assert File.exist?(File.join(@releases_dir, "releases", VERSION, "ios.md"))
+    # notes seeded as a describe-the-fix template — NOT from dev PRs, which
+    # are not on the hotfix branch.
+    refute @gh.called?(:merged_prs_since), "hotfix notes must not be seeded from dev PR history"
+    ios_notes = File.read(File.join(@releases_dir, "releases", VERSION, "ios.md"))
+    assert_match(/Hotfix from #{BASE_TAG}/, ios_notes)
+    assert_match(/Describe the fix/, ios_notes)
     assert File.exist?(File.join(@releases_dir, "releases", VERSION, "android.md"))
     assert File.exist?(File.join(@releases_dir, "releases", VERSION, "submission-notes.md"))
+  end
+
+  # ---- base-tag format ----
+
+  def test_malformed_base_tag_is_a_failure_before_any_clone
+    %w[v2.1 2.1.0 v2.1.0.5 v2.1.x].each do |bad|
+      result = new_hotfix.run(base_tag: bad)
+
+      assert_instance_of Dry::Monads::Result::Failure, result
+      assert_match(/--base-tag must look like vX\.Y\.Z, got '#{Regexp.escape(bad)}'/, result.failure)
+    end
+    refute @gh.called?(:clone), "a malformed base-tag must fail before touching any repo"
   end
 
   # ---- base-tag-not-latest ----
@@ -180,6 +190,36 @@ class HotfixTest < Minitest::Test
     refute @gh.called?(:checkout_branch), "a source-sha mismatch must not touch any repo"
   end
 
+  def test_existing_branch_not_containing_tag_sha_is_a_failure
+    existing_manifest
+    # hotfix/<version> exists on origin but its tip does NOT contain the
+    # captured tag sha — a pre-created or force-updated branch, not ours.
+    @gh.stub_ls_remote("convos-ios", "refs/heads/hotfix/#{VERSION}", "foreign-tip")
+    @gh.stub_not_ancestor("convos-ios")
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/hotfix\/#{VERSION} exists but its tip foreign-tip does not contain ios-tag-sha/, result.failure)
+    ios_pr_creates = @gh.calls_for(:pr_create).select { |c| c.kwargs[:repo] == IOS }
+    assert_empty ios_pr_creates, "a foreign branch must not get a PR opened for it"
+  end
+
+  def test_versions_error_is_a_per_repo_failure_not_a_crash
+    # ios clone is missing its version file — Versions.bump raises
+    # Versions::Error, which must fold into that repo's Failure while the
+    # other repo still completes.
+    @gh.stub_clone("convos-ios") { |dest| FileUtils.mkdir_p(dest) }
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/#{Regexp.escape(IOS)}: Train::Versions::Error/, result.failure)
+
+    data = Train::Manifest.read(manifest_file)
+    assert_equal "branched", data["repos"][ANDROID]["status"], "the other repo must still complete"
+  end
+
   def test_reconcile_mode_partial_failure_rerun_converges
     existing_manifest
     mdir = File.join(@releases_dir, "releases", VERSION)
@@ -221,10 +261,8 @@ class HotfixTest < Minitest::Test
 
   def test_version_arithmetic_v2_1_5_to_2_1_6
     stub_repo_clones(latest_tag: "v2.1.5")
-    @gh.stub_rev_parse("convos-ios", "v2.1.5", "ios-tag-sha")
-    @gh.stub_rev_parse("convos-client", "v2.1.5", "android-tag-sha")
-    @gh.stub_commit_date("convos-ios", "v2.1.5", "2026-07-01")
-    @gh.stub_commit_date("convos-client", "v2.1.5", "2026-07-02")
+    @gh.stub_rev_parse("convos-ios", "v2.1.5^{commit}", "ios-tag-sha")
+    @gh.stub_rev_parse("convos-client", "v2.1.5^{commit}", "android-tag-sha")
 
     result = new_hotfix.run(base_tag: "v2.1.5")
 

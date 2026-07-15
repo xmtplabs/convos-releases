@@ -5,6 +5,7 @@ require "tmpdir"
 require "dry/monads"
 require_relative "github"
 require_relative "manifest"
+require_relative "versions"
 
 module Train
   # Ports the "@convos-conductor merge" command: merges the open release (or
@@ -50,6 +51,13 @@ module Train
     # gate no-ops the actual merge — this method never has to check dry_run
     # itself.
     def run(version:, actor:)
+      # `version` arrives from a caller-resolved branch name and is used in
+      # file paths and branch refs — reject anything that isn't X.Y.Z
+      # before it touches either.
+      unless version.match?(Versions::VERSION_RE)
+        return Failure("version must look like X.Y.Z, got '#{version}'")
+      end
+
       repos, kind = yield read_manifest(version)
 
       # Phase 1: gate EVERY repo before merging anything.
@@ -105,7 +113,8 @@ module Train
 
     # merge_repo: one repo's merge sequence (permission already gated in
     # Phase 1) — find the PR for this version's kind-prefixed branch, then
-    # merge it. Wrapped in its own Result so a Failure here never
+    # merge it. Wrapped in its own Result — including a rescue for API
+    # errors raised by the PR lookup — so nothing here ever
     # short-circuits the OTHER repo's attempt (run() collects both
     # regardless of outcome).
     def merge_repo(repo:, version:, kind:)
@@ -113,13 +122,20 @@ module Train
       return Success("already merged") if pr_number == :already_merged
 
       merge_pr(repo: repo, number: pr_number)
+    rescue Github::ApiError => e
+      Failure(e.message)
     end
 
+    # check_permission: an API failure here is a per-repo Failure, not an
+    # exception — run() folds it into the phase-1 gate report alongside any
+    # other repo's outcome instead of crashing before that report exists.
     def check_permission(repo:, actor:)
       permission = @gh.collaborator_permission(repo, actor)
       return Success(permission) if ALLOWED_PERMISSIONS.include?(permission)
 
       Failure("#{actor} lacks write on #{repo} (got #{permission})")
+    rescue Github::ApiError => e
+      Failure("permission check failed: #{e.message}")
     end
 
     # find_pr: looks for an OPEN <kind>/<version> PR (kind is "release" or

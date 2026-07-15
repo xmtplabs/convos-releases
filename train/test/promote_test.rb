@@ -92,6 +92,24 @@ class PromoteTest < Minitest::Test
     assert_match(/notes-dir=#{Regexp.escape(notes_dir)}/, out)
   end
 
+  def test_prepare_recreates_notes_dir_dropping_stale_files
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    # A leftover .train-promote from an earlier run (manual/local rerun)
+    # holds a file the current release source doesn't have.
+    notes_dir = File.join(@app_dir, ".train-promote")
+    FileUtils.mkdir_p(notes_dir)
+    File.write(File.join(notes_dir, "stale.md"), "from a previous version")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Success, result
+    refute File.exist?(File.join(notes_dir, "stale.md")), "notes dir must be recreated from scratch"
+    assert File.exist?(File.join(notes_dir, "ios.md"))
+  end
+
   def test_prepare_writes_github_output_when_set
     write_manifest_fixture
     stub_matching_trees
@@ -335,6 +353,22 @@ class PromoteTest < Minitest::Test
     assert_equal "## iOS notes\n", @gh.release_body(REPO, "v#{VERSION}")
   end
 
+  def test_prepare_rejects_malformed_version_before_any_io
+    result = new_promote.prepare(**base_args.merge(version: "2.1.0/../evil"))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/version must look like X\.Y\.Z/, result.failure)
+    refute @gh.called?(:clone), "a malformed version must fail before any clone"
+  end
+
+  def test_record_rejects_malformed_version_before_any_io
+    result = new_promote.record(**record_args(version: "2.1.0$(boom)"))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/version must look like X\.Y\.Z/, result.failure)
+    refute @gh.called?(:clone)
+  end
+
   def test_record_rejects_non_integer_value_before_any_io
     stub_releases_clone
 
@@ -346,6 +380,17 @@ class PromoteTest < Minitest::Test
       refute @gh.called?(:clone), "a bad --value must fail before the StateWriter ever clones"
       refute @gh.called?(:release_exists?), "a bad --value must fail before the release check"
     end
+  end
+
+  def test_record_rejects_wrong_platform_key_before_any_io
+    stub_releases_clone
+
+    result = new_promote.record(**record_args(key: "version-code"))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/artifact key version-code does not match #{Regexp.escape(REPO)} \(expected build-number\)/, result.failure)
+    refute @gh.called?(:clone), "a wrong --key must fail before the StateWriter ever clones"
+    refute @gh.called?(:release_exists?), "a wrong --key must fail before the release check"
   end
 
   def test_record_skips_release_creation_when_already_present

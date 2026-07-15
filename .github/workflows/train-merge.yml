@@ -25,6 +25,10 @@ on:
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
+      RELEASES_BOT_APP_ID:
+        required: true
+      RELEASES_BOT_PRIVATE_KEY:
+        required: true
 
 jobs:
   merge:
@@ -68,7 +72,14 @@ jobs:
           repositories: convos-releases,convos-ios,convos-client
 
       - name: train merge
+        # Inputs flow through env vars, not inline ${{ }} interpolation —
+        # `version` derives from a PR head-branch name and `actor` from a
+        # comment author, both externally influenced; interpolating them
+        # into the script text would allow shell injection with the bot
+        # token in scope.
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_VERSION: ${{ inputs.version }}
+          TRAIN_ACTOR: ${{ inputs.actor }}
         run: |
-          train merge --version "${{ inputs.version }}" --actor "${{ inputs.actor }}"
+          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR"

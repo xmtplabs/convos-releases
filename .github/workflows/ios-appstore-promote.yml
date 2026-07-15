@@ -47,6 +47,15 @@ on:
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
+      # Org-level bot credentials; declared so an explicit-secrets caller
+      # learns about them instead of failing at token minting. The
+      # APP_STORE_CONNECT_* secrets are deliberately NOT declared — they
+      # resolve from the caller's testflight environment, not from
+      # workflow_call plumbing.
+      RELEASES_BOT_APP_ID:
+        required: true
+      RELEASES_BOT_PRIVATE_KEY:
+        required: true
 
 jobs:
   promote:
@@ -131,14 +140,21 @@ jobs:
 
       - name: train promote prepare
         id: prepare
+        # Inputs flow through env vars, not inline ${{ }} interpolation —
+        # `version` derives from a PR head-branch name (externally
+        # influenced); interpolating it into the script text would allow
+        # shell injection with the bot token in scope.
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_VERSION: ${{ inputs.version }}
+          TRAIN_MERGE_SHA: ${{ inputs.merge-sha }}
+          TRAIN_HEAD_SHA: ${{ inputs.head-sha }}
         run: |
           train promote prepare \
             --repo "${{ github.repository }}" \
-            --version "${{ inputs.version }}" \
-            --merge-sha "${{ inputs.merge-sha }}" \
-            --head-sha "${{ inputs.head-sha }}"
+            --version "$TRAIN_VERSION" \
+            --merge-sha "$TRAIN_MERGE_SHA" \
+            --head-sha "$TRAIN_HEAD_SHA"
 
       - name: Run fastlane stage_appstore
         env:
@@ -153,17 +169,26 @@ jobs:
         run: fastlane stage_appstore
 
       - name: train promote record
+        # Same env-var discipline as prepare: version (and the tag/outputs
+        # derived from it) trace back to a PR head-branch name.
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_VERSION: ${{ inputs.version }}
+          TRAIN_TAG: ${{ steps.prepare.outputs.tag }}
+          TRAIN_KEY: ${{ steps.prepare.outputs.artifact-key }}
+          TRAIN_VALUE: ${{ steps.prepare.outputs.artifact-value }}
+          TRAIN_NOTES_SHA: ${{ steps.prepare.outputs.notes-sha }}
+          TRAIN_KIND: ${{ steps.prepare.outputs.kind }}
+          TRAIN_PR_NUMBER: ${{ inputs.pr-number }}
         run: |
           args=(promote record \
             --repo "${{ github.repository }}" \
-            --version "${{ inputs.version }}" \
-            --tag "${{ steps.prepare.outputs.tag }}" \
-            --key "${{ steps.prepare.outputs.artifact-key }}" \
-            --value "${{ steps.prepare.outputs.artifact-value }}" \
-            --notes-sha "${{ steps.prepare.outputs.notes-sha }}" \
+            --version "$TRAIN_VERSION" \
+            --tag "$TRAIN_TAG" \
+            --key "$TRAIN_KEY" \
+            --value "$TRAIN_VALUE" \
+            --notes-sha "$TRAIN_NOTES_SHA" \
             --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --kind "${{ steps.prepare.outputs.kind }}")
-          [ -n "${{ inputs.pr-number }}" ] && args+=(--pr "${{ inputs.pr-number }}")
+            --kind "$TRAIN_KIND")
+          [ -n "$TRAIN_PR_NUMBER" ] && args+=(--pr "$TRAIN_PR_NUMBER")
           train "${args[@]}"

@@ -88,6 +88,16 @@ class MergeTest < Minitest::Test
     assert_equal [CLIENT, "octocat"], perm_calls.find { |c| c.args[0] == CLIENT }.args
   end
 
+  # ---- version format ----
+
+  def test_malformed_version_is_a_failure_before_any_io
+    result = new_merge.run(version: "2.1.0/../evil", actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/version must look like X\.Y\.Z/, result.failure)
+    refute @gh.called?(:clone), "a malformed version must fail before the manifest clone"
+  end
+
   # ---- no manifest for version ----
 
   def test_no_manifest_for_version_is_a_failure
@@ -218,6 +228,30 @@ class MergeTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/no release PR for #{VERSION} on #{Regexp.escape(IOS)}/, result.failure)
     refute @gh.calls_for(:pr_merge).any? { |c| c.args[0] == IOS }
+  end
+
+  # ---- API errors fold into Results, never crash the run ----
+
+  def test_permission_api_error_is_a_gate_failure_with_zero_merges
+    both_repos_have_open_release_prs
+    @gh.fail_collaborator_permission(IOS, message: "boom 500")
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/#{Regexp.escape(IOS)}: permission check failed: boom 500/, result.failure)
+    assert_empty @gh.calls_for(:pr_merge), "an API error in the gate must block all merges"
+  end
+
+  def test_pr_lookup_api_error_is_that_repos_failure_other_repo_still_merges
+    both_repos_have_open_release_prs
+    @gh.fail_pr_list(IOS, message: "boom 502")
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/#{Regexp.escape(IOS)}: boom 502/, result.failure)
+    assert @gh.calls_for(:pr_merge).any? { |c| c.args[0] == CLIENT }, "other repo must still be attempted"
   end
 
   # ---- merge API failure ----

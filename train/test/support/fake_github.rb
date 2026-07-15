@@ -60,11 +60,12 @@ class FakeGithub
     @latest_tags[dir_suffix] = tag
   end
 
-  # stub_commit_date: scripts commit_date(dir, ref) for the clone whose
-  # directory basename is `dir_suffix`, keyed on `ref`.
-  def stub_commit_date(dir_suffix, ref, date)
-    @commit_dates ||= {}
-    @commit_dates[[dir_suffix, ref]] = date
+  # stub_not_ancestor: scripts ancestor?(dir, ancestor, descendant) to
+  # return false for the clone whose directory basename is `dir_suffix` —
+  # tests default to true (any existing branch contains the asked-about
+  # sha) unless scripted here.
+  def stub_not_ancestor(dir_suffix)
+    (@not_ancestors ||= {})[dir_suffix] = true
   end
 
   def stub_rev_parse(dir_suffix, ref, sha)
@@ -124,6 +125,18 @@ class FakeGithub
     @pr_merge_failures[[repo, number]] = message
   end
 
+  # fail_collaborator_permission: every subsequent
+  # collaborator_permission(repo, ...) call raises Train::Github::ApiError.
+  def fail_collaborator_permission(repo, message: "simulated permission API failure")
+    (@permission_failures ||= {})[repo] = message
+  end
+
+  # fail_pr_list: every subsequent pr_list(repo: repo, ...) call raises
+  # Train::Github::ApiError.
+  def fail_pr_list(repo, message: "simulated pr list API failure")
+    (@pr_list_failures ||= {})[repo] = message
+  end
+
   # ---- Github interface ----
 
   def ls_remote(dir, ref)
@@ -153,13 +166,11 @@ class FakeGithub
     @latest_tags[suffix(dir)] || ""
   end
 
-  # commit_date: read-only, scriptable via stub_commit_date; defaults to a
-  # deterministic per-(dir,ref) fixture string when not explicitly stubbed,
-  # so tests that don't care about the exact date still get a stable value.
-  def commit_date(dir, ref)
-    record(:commit_date, [dir, ref])
-    @commit_dates ||= {}
-    @commit_dates[[suffix(dir), ref]] || "2026-07-01"
+  # ancestor?: read-only, defaults to true unless scripted via
+  # stub_not_ancestor for this clone's directory basename.
+  def ancestor?(dir, ancestor, descendant)
+    record(:ancestor?, [dir, ancestor, descendant])
+    !(@not_ancestors || {})[suffix(dir)]
   end
 
   def clone(url, dest, depth: nil, filter: nil)
@@ -188,6 +199,10 @@ class FakeGithub
 
   def pr_list(repo:, head: nil, base: nil, state: "open")
     record(:pr_list, [], { repo: repo, head: head, base: base, state: state })
+    if @pr_list_failures&.key?(repo)
+      raise ::Train::Github::ApiError, @pr_list_failures[repo]
+    end
+
     @pr_lists[[repo, head, base, state]]
   end
 
@@ -242,6 +257,10 @@ class FakeGithub
   # not), matching the real Github#collaborator_permission.
   def collaborator_permission(repo, login)
     record(:collaborator_permission, [repo, login])
+    if @permission_failures&.key?(repo)
+      raise ::Train::Github::ApiError, @permission_failures[repo]
+    end
+
     @permissions[repo]
   end
 
