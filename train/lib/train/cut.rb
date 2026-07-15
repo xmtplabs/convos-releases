@@ -284,6 +284,8 @@ module Train
       if existing_bump.empty?
         @gh.checkout_branch(dir, bump_head, sha)
         Versions.bump(dir, nxt)
+        # fresh clone: no committer identity until we set the bot's
+        @gh.git_config_bot(dir)
         @gh.commit(dir, "chore: bump version to #{nxt} after #{version} cut", all: true)
         unless @gh.push(dir, bump_head, force: true)
           loud_warning("#{repo}: bump branch push failed; skipping bump PR")

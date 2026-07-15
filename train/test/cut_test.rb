@@ -294,6 +294,24 @@ class CutTest < Minitest::Test
     assert_equal "cut", data["status"]
   end
 
+  def test_bump_commit_configures_bot_identity_in_app_clones
+    # A fresh app-repo clone has no committer identity; the bump commit
+    # must set the bot's rather than inherit the runner's (absent) global
+    # git config.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert result.success?
+    configured_dirs = @gh.calls_for(:git_config_bot).map { |c| c[:args].first }
+    assert(configured_dirs.any? { |d| d.end_with?("/convos-ios") }, "bot identity not configured in the ios clone")
+    assert(configured_dirs.any? { |d| d.end_with?("/convos-client") }, "bot identity not configured in the client clone")
+  end
+
   def test_bump_branch_push_failure_warns_and_skips_pr_create_without_aborting
     # ensure_bump_pr's push failing is best-effort: warn and return early,
     # WITHOUT calling pr_create for a branch that never made it to origin.

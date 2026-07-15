@@ -144,8 +144,8 @@ module Train
 
     def git_config_bot(dir)
       mutate!("git config user.name/email (#{dir})") do
-        run!(["git", "-C", dir, "config", "user.name", "convos-releases-bot"])
-        run!(["git", "-C", dir, "config", "user.email", "convos-releases-bot[bot]@users.noreply.github.com"])
+        run!(["git", "-C", dir, "config", "user.name", "convos-conductor"])
+        run!(["git", "-C", dir, "config", "user.email", "convos-conductor[bot]@users.noreply.github.com"])
       end
     end
 
