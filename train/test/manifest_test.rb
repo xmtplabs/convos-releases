@@ -142,6 +142,68 @@ class ManifestTest < Minitest::Test
     refute_match(/source_sha/, raw)
   end
 
+  # ---- record_promotion ----
+
+  def test_record_promotion_writes_promoted_block_and_repo_status
+    init_with_one_repo
+    changed = Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    assert_equal true, changed
+
+    data = Train::Manifest.read(file)
+    repo = data["repos"]["xmtplabs/convos-ios"]
+    assert_equal "promoted", repo["status"]
+    assert_equal({
+      "build-number" => 421, "tag" => "v2.1.0", "notes-sha" => "notes-sha-1", "run" => "https://run/1"
+    }, repo["promoted"])
+  end
+
+  def test_record_promotion_sets_top_level_status_only_when_every_repo_promoted
+    Train::Manifest.init(
+      file, version: "2.1.0", kind: "release", cut_date: "2026-07-16",
+      repos: { "xmtplabs/convos-ios" => "sha-ios", "xmtplabs/convos-client" => "sha-client" }
+    )
+
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    data = Train::Manifest.read(file)
+    refute_equal "promoted", data["status"], "top-level status must not flip until every repo is promoted"
+
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-client", key: "version-code", value: "77",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/2"
+    )
+    data = Train::Manifest.read(file)
+    assert_equal "promoted", data["status"]
+  end
+
+  def test_record_promotion_is_idempotent_for_identical_block
+    init_with_one_repo
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    changed = Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    assert_equal false, changed
+  end
+
+  def test_record_promotion_rejects_non_integer_value
+    init_with_one_repo
+    assert_raises(Train::Manifest::Error) do
+      Train::Manifest.record_promotion(
+        file, repo: "xmtplabs/convos-ios", key: "build-number", value: "abc",
+        tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+      )
+    end
+  end
+
   private
 
   def init_with_one_repo

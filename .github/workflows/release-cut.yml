@@ -22,6 +22,10 @@ on:
         description: Print the plan, mutate nothing
         type: boolean
         default: false
+      hotfix-base-tag:
+        description: "Cut a hotfix from this tag instead (vX.Y.Z); leave empty for a normal cut"
+        type: string
+        default: ""
 
 concurrency:
   group: release-train
@@ -59,15 +63,24 @@ jobs:
       # All cut logic (slot/day/skip decision, in-flight recovery, capture,
       # manifest-first, branch/PR ensure-state) lives in the tested `train`
       # CLI — this workflow only plumbs credentials and the trigger context.
+      # A non-empty hotfix-base-tag switches this step to `train hotfix`
+      # instead of `train cut` — hotfix has no force flag (dispatch-only, no
+      # slot/day/skip decision to bypass).
       - name: Cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           TRAIN_SCHEDULE: ${{ github.event.schedule }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
+          TRAIN_HOTFIX_BASE_TAG: ${{ inputs.hotfix-base-tag || '' }}
         run: |
-          args=(cut)
-          [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")
-          [ "$TRAIN_FORCE" = "true" ] && args+=(--force)
-          [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          if [ -n "$TRAIN_HOTFIX_BASE_TAG" ]; then
+            args=(hotfix --base-tag "$TRAIN_HOTFIX_BASE_TAG")
+            [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          else
+            args=(cut)
+            [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")
+            [ "$TRAIN_FORCE" = "true" ] && args+=(--force)
+            [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          fi
           nix develop --command train "${args[@]}"

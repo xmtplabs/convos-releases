@@ -70,6 +70,34 @@ module Train
       out.strip
     end
 
+    # tag_sha: resolves refs/tags/<tag> on origin — "" if the tag doesn't
+    # exist. Read-only (ls-remote), so it always executes, dry-run or not.
+    def tag_sha(dir, tag)
+      ls_remote(dir, "refs/tags/#{tag}")
+    end
+
+    # latest_tag: the highest-sorting local tag matching `pattern` (e.g.
+    # "v*"), or "" if none exist. Sorts by `-v:refname` — a version-aware
+    # descending sort — rather than `-creatordate`, since creation order can
+    # disagree with semver order (e.g. a hotfix tag for an older line
+    # created after a newer release tag). Requires a clone with tag history
+    # (Hotfix clones blob:none, which still fetches all tags). Read-only, so
+    # it always executes, dry-run or not.
+    def latest_tag(dir, pattern)
+      out, = run!(["git", "-C", dir, "tag", "--list", pattern, "--sort=-v:refname"])
+      out.lines.first.to_s.strip
+    end
+
+    # commit_date: the author date (YYYY-MM-DD, local to the committer) of
+    # `ref`, mirroring `git log -1 --format=%cs`. Read-only, so it always
+    # executes, dry-run or not — Hotfix uses this to derive the notes-seed
+    # `since` boundary from the base tag's commit rather than a manifest
+    # cut-date (hotfixes don't have a prior manifest to derive from).
+    def commit_date(dir, ref)
+      out, = run!(["git", "-C", dir, "log", "-1", "--format=%cs", ref])
+      out.strip
+    end
+
     def clone(url, dest, depth: nil, filter: nil)
       args = %w[git clone --quiet]
       args += ["--depth", depth.to_s] if depth
@@ -84,15 +112,17 @@ module Train
     end
 
     # pr_list: PRs matching repo/head/base/state, normalized to plain
-    # string-keyed Hashes (number, url) — same shape callers got from `gh
-    # pr list --json number,url`, regardless of Octokit's Sawyer::Resource
-    # internals.
+    # string-keyed Hashes (number, url, merged_at) — same shape callers got
+    # from `gh pr list --json number,url,mergedAt`, regardless of Octokit's
+    # Sawyer::Resource internals. merged_at is nil for an unmerged PR (open
+    # or closed-without-merging); Merge#find_pr uses it to tell "closed,
+    # merged" from "closed, abandoned" when scanning state: "all".
     def pr_list(repo:, head: nil, base: nil, state: "open")
       options = { state: state }
       options[:head] = "#{repo.split("/").first}:#{head}" if head
       options[:base] = base if base
       api! { client.pull_requests(repo, options) }
-        .map { |pr| { "number" => pr[:number], "url" => pr[:html_url] } }
+        .map { |pr| { "number" => pr[:number], "url" => pr[:html_url], "merged_at" => pr[:merged_at] } }
     end
 
     # merged_prs_since: raw PR data (number, title, author.is_bot) for
@@ -111,6 +141,38 @@ module Train
           "author" => { "is_bot" => item.dig(:user, :type) == "Bot" }
         }
       end
+    end
+
+    # collaborator_permission: the permission level ("admin", "write",
+    # "maintain", "triage", "read"/"none") `login` has on `repo`, straight
+    # from Octokit's permission_level endpoint. Read-only, so it always
+    # executes (dry-run or not) — Merge's permission gate needs the real
+    # answer even under dry-run.
+    def collaborator_permission(repo, login)
+      api! { client.permission_level(repo, login) }[:permission]
+    end
+
+    # release_exists?: true/false for whether `repo` already has a GitHub
+    # Release tagged `tag`. Read-only (always executes, dry-run or not) —
+    # Promote#record needs the real answer under dry-run too, to print an
+    # accurate "would create" vs "already exists" line. A 404 from Octokit
+    # means "no release for this tag" and is treated as `false` rather than
+    # an ApiError; any other Octokit failure still raises ApiError.
+    #
+    # Deliberately does NOT go through api!: api! rescues Octokit::Error —
+    # NotFound's ancestor — inside the wrapped call and re-raises ApiError,
+    # so a `rescue Octokit::NotFound` around api! would be dead code (the
+    # NotFound never escapes api!) and every first-time release creation
+    # would hard-fail. The 404-vs-real-error split has to happen on the raw
+    # Octokit exception hierarchy, with the ApiError normalization inlined
+    # for the non-404 case.
+    def release_exists?(repo, tag)
+      client.release_for_tag(repo, tag)
+      true
+    rescue Octokit::NotFound
+      false
+    rescue Octokit::Error => e
+      raise ApiError.new("release_for_tag(#{repo}, #{tag}): #{e.message}", cause: e)
     end
 
     # dirty?: true if `path` (relative to dir) has uncommitted changes.
@@ -194,6 +256,35 @@ module Train
       mutate!("create PR #{repo} #{head}->#{base}: #{title.inspect}") do
         api! { client.create_pull_request(repo, base, head, title, body) }
         nil
+      end
+    end
+
+    # create_release: mutation-gated. `name` and `body` mirror Octokit's
+    # create_release options.
+    def create_release(repo, tag:, name:, body:)
+      mutate!("create release #{repo}@#{tag}") do
+        api! { client.create_release(repo, tag, name: name, body: body) }
+        nil
+      end
+    end
+
+    # pr_comment: post an issue/PR comment. Mutation-gated like pr_create.
+    def pr_comment(repo, number, body)
+      mutate!("comment on #{repo}##{number}") do
+        api! { client.add_comment(repo, number, body) }
+        nil
+      end
+    end
+
+    # pr_merge: merge PR `number` on `repo` via the given merge_method
+    # ("merge", "squash", "rebase"). Mutation-gated. Any Octokit failure
+    # (already merged, checks failing, conflicts, ...) surfaces as
+    # ApiError — Merge#run turns that into a per-repo Failure rather than
+    # letting it propagate and abort the other repo's attempt.
+    def pr_merge(repo, number, merge_method: "merge")
+      mutate!("merge #{repo}##{number} (#{merge_method})", default: true) do
+        api! { client.merge_pull_request(repo, number, "", merge_method: merge_method) }
+        true
       end
     end
 

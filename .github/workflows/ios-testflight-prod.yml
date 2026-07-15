@@ -48,6 +48,12 @@ jobs:
     concurrency:
       group: testflight-${{ github.repository }}
       cancel-in-progress: false
+    # Resolves the testflight environment OF THE CALLER REPO: ASC API key
+    # secrets move here (off repo-level secrets) so PR-triggered workflows
+    # can never read them; the environment's deployment-branch policy
+    # restricts runs to dev/release/*/hotfix/*/main. ios-appstore-promote.yml
+    # (Phase-2 promotion) resolves the same secrets from this environment.
+    environment: testflight
     timeout-minutes: 45
     permissions:
       id-token: write

@@ -1,0 +1,168 @@
+# Reusable: promote an already-uploaded TestFlight RC to App Store Connect
+# staging (metadata-only, no binary upload, no submission) once its release
+# PR merges. Lifted from ios-testflight-prod.yml's front-matter (checkout,
+# Nix, Xcode pin, Cachix, dev shell); caller keeps triggers.
+#
+# ASC credentials come from the CALLER repo's `testflight` environment
+# (declared on the job below), not from repo-level secrets — same
+# environment ios-testflight-prod.yml resolves RC-upload credentials from.
+# Only CACHIX_AUTH_TOKEN arrives via `secrets: inherit`.
+#
+# `train promote prepare` tags the merge commit and stages release notes;
+# `stage_appstore` writes the already-uploaded build's ASC metadata (version,
+# what's-new, review notes) using the build number `prepare` resolved from
+# the manifest; `train promote record` writes the promoted block back to
+# convos-releases and ensures a GitHub Release exists on the caller repo.
+name: iOS App Store Promote (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the promote job
+        type: string
+        default: warp-macos-latest-arm64-12x
+      version:
+        description: Release version (X.Y.Z) being promoted
+        type: string
+        required: true
+      merge-sha:
+        description: Merge commit of the release PR (tagged v<version>)
+        type: string
+        required: true
+      head-sha:
+        description: Release-branch tip the promoted RC was uploaded from
+        type: string
+        required: true
+      pr-number:
+        description: Release PR number, for the staged-submission comment (omit to skip)
+        type: string
+        default: ""
+      xcode-app-path:
+        type: string
+        required: true
+      xcode-nix-path:
+        type: string
+        required: true
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  promote:
+    name: Stage TestFlight RC's App Store Connect metadata
+    runs-on: ${{ inputs.runner }}
+    # Resolves the testflight environment OF THE CALLER REPO: its App Store
+    # Connect API key secrets and deployment-branch policy (release/hotfix)
+    # apply to this job, same as ios-testflight-prod.yml.
+    environment: testflight
+    # Serialize TestFlight/ASC mutations at the job itself, same group as
+    # the RC upload workflow — promotion and RC uploads must not race.
+    # Queue, never cancel.
+    concurrency:
+      group: testflight-${{ github.repository }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      # Pushes (the promotion tag) use the minted bot token via an explicit
+      # `git remote set-url`, not GITHUB_TOKEN — train/lib/train/promote.rb
+      # pushes straight to the checkout's `origin` and has no remote-auth
+      # step of its own (unlike Cut, which rewrites releases_dir's remote
+      # via set_bot_remote). contents: read is enough for the checkout
+      # itself; the bot-remote step below is what makes the tag push work.
+      contents: read
+    env:
+      XCODE_NIX_PATH: ${{ inputs.xcode-nix-path }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The default persisted GITHUB_TOKEN auth header would override
+          # the bot-token remote URL set below — pushes would authenticate
+          # as github-actions[bot], which the main ruleset does not bypass.
+          persist-credentials: false
+          # assert_trees_match (train promote prepare) needs both the merge
+          # commit's and the release-branch tip's trees reachable locally.
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Pin Xcode into /nix/store
+        uses: xmtplabs/xmtp-cache-apple@v1
+        with:
+          xcode-path: ${{ inputs.xcode-app-path }}
+          xcode-nix-path: ${{ inputs.xcode-nix-path }}
+
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Enter dev shell
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: "--accept-flake-config --impure"
+
+      - name: Mint bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases,convos-ios,convos-client
+
+      # Tool gap: Train::Promote#ensure_tag pushes the promotion tag to this
+      # checkout's `origin` directly (train/lib/train/promote.rb) — it has
+      # no set_bot_remote-equivalent of its own, unlike Train::Cut. Rewrite
+      # the remote here so the push authenticates as the bot instead of
+      # failing under persist-credentials: false (no auth at all) or
+      # succeeding as github-actions[bot] (blocked by the main ruleset).
+      - name: Point origin at the bot token
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: train promote prepare
+        id: prepare
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          train promote prepare \
+            --repo "${{ github.repository }}" \
+            --version "${{ inputs.version }}" \
+            --merge-sha "${{ inputs.merge-sha }}" \
+            --head-sha "${{ inputs.head-sha }}"
+
+      - name: Run fastlane stage_appstore
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          # Passed directly to fastlane's app_store_connect_api_key via key_content;
+          # stays in memory, never written to disk, redacted from logs.
+          APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+          TRAIN_VERSION: ${{ inputs.version }}
+          TRAIN_BUILD_NUMBER: ${{ steps.prepare.outputs.artifact-value }}
+          TRAIN_NOTES_DIR: ${{ steps.prepare.outputs.notes-dir }}
+        run: fastlane stage_appstore
+
+      - name: train promote record
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          args=(promote record \
+            --repo "${{ github.repository }}" \
+            --version "${{ inputs.version }}" \
+            --tag "${{ steps.prepare.outputs.tag }}" \
+            --key "${{ steps.prepare.outputs.artifact-key }}" \
+            --value "${{ steps.prepare.outputs.artifact-value }}" \
+            --notes-sha "${{ steps.prepare.outputs.notes-sha }}" \
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          [ -n "${{ inputs.pr-number }}" ] && args+=(--pr "${{ inputs.pr-number }}")
+          train "${args[@]}"

@@ -1,0 +1,171 @@
+# Reusable: promote an already-uploaded Play internal RC to the production
+# track (draft) once its release PR merges. Runs `nix develop ./` on the
+# CALLER's checkout — the caller's flake.lock pins the convos-releases
+# fastlane package + train CLI, so this file only pins step orchestration.
+#
+# Prod Play credentials come from the CALLER repo's `play-prod` environment
+# (declared on the job below), not from repo-level secrets — same
+# environment android-play-internal.yml resolves RC-upload credentials
+# from. Only CACHIX_AUTH_TOKEN arrives via `secrets: inherit`.
+#
+# `train promote prepare` tags the merge commit and stages release notes;
+# `stage_play` moves the already-uploaded internal-track build to production
+# (draft) using the versionCode `prepare` resolved from the manifest;
+# `train promote record` writes the promoted block back to convos-releases
+# and ensures a GitHub Release exists on the caller repo.
+name: Android Play Promote (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the promote job
+        type: string
+        default: warp-ubuntu-latest-x64-8x
+      project-dir:
+        description: Directory containing the gradle root (and fastlane/ stub)
+        type: string
+        default: android
+      version:
+        description: Release version (X.Y.Z) being promoted
+        type: string
+        required: true
+      merge-sha:
+        description: Merge commit of the release PR (tagged v<version>)
+        type: string
+        required: true
+      head-sha:
+        description: Release-branch tip the promoted RC was uploaded from
+        type: string
+        required: true
+      pr-number:
+        description: Release PR number, for the staged-submission comment (omit to skip)
+        type: string
+        default: ""
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+
+jobs:
+  promote:
+    name: Promote Play internal RC to production (draft)
+    runs-on: ${{ inputs.runner }}
+    # Resolves the play-prod environment OF THE CALLER REPO: its Play
+    # service-account secret and deployment-branch policy (release/hotfix)
+    # apply to this job, same as android-play-internal.yml.
+    environment: play-prod
+    # Serialize Play mutations at the job itself, same group as the RC
+    # upload workflow — promotion and internal uploads must not race each
+    # other. Queue, never cancel.
+    concurrency:
+      group: play-internal-${{ github.repository }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    permissions:
+      # Pushes (the promotion tag) use the minted bot token via an explicit
+      # `git remote set-url`, not GITHUB_TOKEN — train/lib/train/promote.rb
+      # pushes straight to the checkout's `origin` and has no remote-auth
+      # step of its own (unlike Cut, which rewrites releases_dir's remote
+      # via set_bot_remote). contents: read is enough for the checkout
+      # itself; the bot-remote step below is what makes the tag push work.
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The default persisted GITHUB_TOKEN auth header would override
+          # the bot-token remote URL set below — pushes would authenticate
+          # as github-actions[bot], which the main ruleset does not bypass.
+          persist-credentials: false
+          # assert_trees_match (train promote prepare) needs both the merge
+          # commit's and the release-branch tip's trees reachable locally.
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Enter dev shell
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: "--accept-flake-config"
+
+      - name: Mint bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases,convos-ios,convos-client
+
+      # Tool gap: Train::Promote#ensure_tag pushes the promotion tag to this
+      # checkout's `origin` directly (train/lib/train/promote.rb) — it has
+      # no set_bot_remote-equivalent of its own, unlike Train::Cut. Rewrite
+      # the remote here so the push authenticates as the bot instead of
+      # failing under persist-credentials: false (no auth at all) or
+      # succeeding as github-actions[bot] (blocked by the main ruleset).
+      - name: Point origin at the bot token
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: train promote prepare
+        id: prepare
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          train promote prepare \
+            --repo "${{ github.repository }}" \
+            --version "${{ inputs.version }}" \
+            --merge-sha "${{ inputs.merge-sha }}" \
+            --head-sha "${{ inputs.head-sha }}"
+
+      - name: Decode Play service account
+        env:
+          PLAY_SA_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        # Secret values never reach the job log: stdout is redirected into
+        # the file, the shell does not echo commands, and Actions masks
+        # registered secret values anyway. printf avoids echo's escape
+        # processing on the base64 text. Guarded the same way as
+        # android-play-internal.yml's decode step: a missing/misplaced
+        # secret (e.g. still repo-level, or a typo'd environment name)
+        # yields an empty value that would otherwise fail minutes later
+        # with a cryptic gradle/supply error.
+        run: |
+          [ -n "$PLAY_SA_B64" ] || { echo "::error::PLAY_SERVICE_ACCOUNT_JSON secret is missing (check the play-prod environment)"; exit 1; }
+          printf '%s' "$PLAY_SA_B64" | base64 -d > "$RUNNER_TEMP/play-sa.json"
+
+      - name: Run fastlane android stage_play
+        working-directory: ${{ inputs.project-dir }}
+        env:
+          TRAIN_VERSION_CODE: ${{ steps.prepare.outputs.artifact-value }}
+          TRAIN_NOTES_DIR: ${{ steps.prepare.outputs.notes-dir }}
+          PLAY_SERVICE_ACCOUNT_JSON_PATH: ${{ runner.temp }}/play-sa.json
+        run: fastlane android stage_play
+
+      - name: train promote record
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: |
+          args=(promote record \
+            --repo "${{ github.repository }}" \
+            --version "${{ inputs.version }}" \
+            --tag "${{ steps.prepare.outputs.tag }}" \
+            --key "${{ steps.prepare.outputs.artifact-key }}" \
+            --value "${{ steps.prepare.outputs.artifact-value }}" \
+            --notes-sha "${{ steps.prepare.outputs.notes-sha }}" \
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
+          [ -n "${{ inputs.pr-number }}" ] && args+=(--pr "${{ inputs.pr-number }}")
+          train "${args[@]}"
+
+      - name: Clean up decoded secrets
+        if: always()
+        run: rm -f "$RUNNER_TEMP/play-sa.json"

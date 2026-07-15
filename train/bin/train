@@ -43,6 +43,22 @@ def cmd_cut(argv)
   unwrap_result(cut.run(force: opts[:force], schedule: opts[:schedule], date_override: opts[:date]))
 end
 
+def cmd_hotfix(argv)
+  opts = { dry_run: false, base_tag: nil, repo: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train hotfix --base-tag vX.Y.Z [--repo OWNER/NAME] [--dry-run]"
+    o.on("--base-tag TAG") { |v| opts[:base_tag] = v }
+    o.on("--repo REPO") { |v| opts[:repo] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+
+  fail_loud("hotfix: --base-tag is required") unless opts[:base_tag]
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  hotfix = Train::Hotfix.new(github: github, releases_dir: Dir.pwd)
+  unwrap_result(hotfix.run(base_tag: opts[:base_tag], only_repo: opts[:repo]))
+end
+
 def cmd_append_rc(argv)
   opts = { dry_run: false, repo: nil, sha: nil, run: nil, key: nil, value: nil, version: nil }
   OptionParser.new do |o|
@@ -69,6 +85,95 @@ def cmd_append_rc(argv)
     repo: opts[:repo], sha: opts[:sha], run_url: opts[:run],
     key: opts[:key], value: opts[:value], version: opts[:version]
   ))
+end
+
+def cmd_promote(argv)
+  sub = argv.shift
+  case sub
+  when "prepare"
+    cmd_promote_prepare(argv)
+  when "record"
+    cmd_promote_record(argv)
+  else
+    fail_loud("promote: unknown subcommand '#{sub}' (expected: prepare, record)")
+  end
+end
+
+def cmd_promote_prepare(argv)
+  opts = { dry_run: false, repo: nil, version: nil, merge_sha: nil, head_sha: nil, app_dir: Dir.pwd }
+  OptionParser.new do |o|
+    o.banner = "Usage: train promote prepare --repo OWNER/NAME --version X.Y.Z --merge-sha SHA --head-sha SHA [--app-dir DIR] [--dry-run]"
+    o.on("--repo REPO") { |v| opts[:repo] = v }
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--merge-sha SHA") { |v| opts[:merge_sha] = v }
+    o.on("--head-sha SHA") { |v| opts[:head_sha] = v }
+    o.on("--app-dir DIR") { |v| opts[:app_dir] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+
+  %i[repo version merge_sha head_sha].each do |k|
+    fail_loud("promote prepare: --#{k.to_s.tr("_", "-")} is required") unless opts[k]
+  end
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  promote = Train::Promote.new(github: github)
+  unwrap_result(promote.prepare(
+    repo: opts[:repo], version: opts[:version], merge_sha: opts[:merge_sha],
+    head_sha: opts[:head_sha], app_dir: opts[:app_dir]
+  ))
+end
+
+def cmd_promote_record(argv)
+  opts = {
+    dry_run: false, repo: nil, version: nil, tag: nil, key: nil, value: nil,
+    notes_sha: nil, run: nil, pr: nil, app_dir: Dir.pwd
+  }
+  OptionParser.new do |o|
+    o.banner = "Usage: train promote record --repo OWNER/NAME --version X.Y.Z --tag vX.Y.Z --key K --value N " \
+               "--notes-sha S --run URL [--pr N] [--app-dir DIR] [--dry-run]"
+    o.on("--repo REPO") { |v| opts[:repo] = v }
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--tag TAG") { |v| opts[:tag] = v }
+    o.on("--key KEY") { |v| opts[:key] = v }
+    o.on("--value N") { |v| opts[:value] = v }
+    o.on("--notes-sha SHA") { |v| opts[:notes_sha] = v }
+    o.on("--run URL") { |v| opts[:run] = v }
+    o.on("--pr N", Integer) { |v| opts[:pr] = v }
+    o.on("--app-dir DIR") { |v| opts[:app_dir] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+
+  %i[repo version tag key value notes_sha run].each do |k|
+    fail_loud("promote record: --#{k.to_s.tr("_", "-")} is required") unless opts[k]
+  end
+  unless %w[version-code build-number].include?(opts[:key])
+    fail_loud("promote record: --key must be version-code or build-number, got '#{opts[:key]}'")
+  end
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  promote = Train::Promote.new(github: github)
+  unwrap_result(promote.record(
+    repo: opts[:repo], version: opts[:version], tag: opts[:tag], key: opts[:key], value: opts[:value],
+    notes_sha: opts[:notes_sha], run_url: opts[:run], pr_number: opts[:pr], app_dir: opts[:app_dir]
+  ))
+end
+
+def cmd_merge(argv)
+  opts = { dry_run: false, version: nil, actor: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train merge --version X.Y.Z --actor LOGIN [--dry-run]"
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--actor LOGIN") { |v| opts[:actor] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+
+  %i[version actor].each do |k|
+    fail_loud("merge: --#{k} is required") unless opts[k]
+  end
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  merge = Train::Merge.new(github: github)
+  unwrap_result(merge.run(version: opts[:version], actor: opts[:actor]))
 end
 
 def cmd_seed_notes(argv)
@@ -145,7 +250,10 @@ end
 
 COMMANDS = {
   "cut" => method(:cmd_cut),
+  "hotfix" => method(:cmd_hotfix),
   "append-rc" => method(:cmd_append_rc),
+  "promote" => method(:cmd_promote),
+  "merge" => method(:cmd_merge),
   "seed-notes" => method(:cmd_seed_notes),
   "bump-version" => method(:cmd_bump_version),
   "status" => method(:cmd_status)
@@ -155,7 +263,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|append-rc|seed-notes|bump-version|status) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|bump-version|status) ..."
   exit 1
 end
 

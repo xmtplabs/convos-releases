@@ -89,6 +89,34 @@ module Train
       data
     end
 
+    # record_promotion: writes the per-repo "promoted" block (artifact
+    # key/value, tag, notes-sha, run) and flips that repo's status to
+    # "promoted". Advances the TOP-LEVEL status to "promoted" only once
+    # EVERY repo under "repos" carries a promoted block — mirrors
+    # set_status's cut->branched advance in cut.rb, but gated on full
+    # completion rather than a single ensure_all_repos result. Idempotent:
+    # an identical existing block is a no-op (returns false) so a rerun of
+    # `train promote prepare` against an already-promoted repo doesn't
+    # rewrite (and re-commit) an unchanged manifest.
+    def record_promotion(file, repo:, key:, value:, tag:, notes_sha:, run:)
+      int_value = validate_integer!(value)
+
+      data = read(file)
+      repo_data = data.fetch("repos").fetch(repo) do
+        raise Error, "#{file}: no repo #{repo} in manifest"
+      end
+
+      block = { key => int_value, "tag" => tag, "notes-sha" => notes_sha, "run" => run }
+      return false if repo_data["promoted"] == block
+
+      repo_data["promoted"] = block
+      repo_data["status"] = "promoted"
+
+      data["status"] = "promoted" if data.fetch("repos").values.all? { |r| r["promoted"] }
+      write(file, data)
+      true
+    end
+
     def read(file)
       # permitted_classes: [Date] — a human hand-editing cut-date via the
       # GitHub web pencil (design spec shows it unquoted, e.g.

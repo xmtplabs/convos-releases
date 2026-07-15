@@ -143,4 +143,63 @@ platform :android do
       android_artifact_path: apk,
     )
   end
+
+  desc "Promote an already-uploaded internal build to the Play Store production track (draft)"
+  lane :stage_play do
+    require "fileutils"
+    require "json"
+
+    # Same SA-file contract and validation as play_internal — fail fast,
+    # before touching the Play API, on a missing/unreadable/invalid key.
+    sa_path = ENV.fetch("PLAY_SERVICE_ACCOUNT_JSON_PATH")
+    UI.user_error!("Play service account file missing or unreadable: #{sa_path}") unless File.readable?(sa_path)
+    begin
+      JSON.parse(File.read(sa_path))
+    rescue JSON::ParserError => e
+      UI.user_error!("Play service account file is not valid JSON: #{e.message}")
+    end
+
+    # TRAIN_VERSION_CODE must be the exact versionCode already uploaded to
+    # the internal track by play_internal — supply's promote step looks it
+    # up by this value, so a blank or non-numeric one fails loudly here
+    # rather than as an opaque Play API error later.
+    version_code_raw = ENV.fetch("TRAIN_VERSION_CODE", "").strip
+    UI.user_error!("TRAIN_VERSION_CODE is required and must not be empty") if version_code_raw.empty?
+    UI.user_error!("TRAIN_VERSION_CODE must be a positive integer, got: #{version_code_raw.inspect}") unless version_code_raw.match?(/\A\d+\z/)
+    version_code = version_code_raw.to_i
+    UI.user_error!("TRAIN_VERSION_CODE must be a positive integer, got: #{version_code}") unless version_code.positive?
+
+    notes_dir = ENV.fetch("TRAIN_NOTES_DIR", "").strip
+    UI.user_error!("TRAIN_NOTES_DIR is required and must not be empty") if notes_dir.empty?
+    UI.user_error!("TRAIN_NOTES_DIR does not exist: #{notes_dir}") unless Dir.exist?(notes_dir)
+
+    android_notes_path = File.join(notes_dir, "android.md")
+    UI.user_error!("android notes file missing: #{android_notes_path}") unless File.readable?(android_notes_path)
+    # Play rejects release notes over 500 characters — truncate, don't fail
+    # a finished promotion over a long changelog.
+    changelog_text = File.read(android_notes_path)[0, 500]
+
+    # Absolute path, resolved once: FastlaneFolder.path can be a memoized
+    # RELATIVE "./" and supply evaluates relative paths under a different
+    # cwd than the lane. Mirrors play_internal.
+    metadata_dir = File.expand_path(File.join(FastlaneCore::FastlaneFolder.path, "metadata", "android"))
+    changelog_dir = File.join(metadata_dir, "en-US", "changelogs")
+    FileUtils.mkdir_p(changelog_dir)
+    File.write(File.join(changelog_dir, "#{version_code}.txt"), changelog_text)
+
+    upload_to_play_store(
+      package_name: "org.convos.android",
+      track: "internal",
+      track_promote_to: "production",
+      track_promote_release_status: "draft",
+      version_code: version_code,
+      json_key: sa_path,
+      metadata_path: metadata_dir,
+      skip_upload_apk: true,
+      skip_upload_aab: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
 end

@@ -28,6 +28,11 @@ class FakeGithub
     @push_fail_countdown = Hash.new(0) # refspec => remaining failures before success
     @clone_error_countdown = Hash.new(0) # url-substring => remaining CommandErrors before success
     @pr_merge_results = Hash.new(true)
+    @releases = {} # [repo, tag] => true
+    @release_bodies = {} # [repo, tag] => body
+    @pr_comments = [] # [{repo:, number:, body:}]
+    @permissions = Hash.new("write") # repo => permission (default: write)
+    @pr_merge_failures = {} # [repo, number] => message
   end
 
   # ---- test scripting API ----
@@ -41,6 +46,30 @@ class FakeGithub
 
   def stub_ls_remote(dir_suffix, ref, sha)
     @ls_remote[[dir_suffix, ref]] = sha
+  end
+
+  def stub_tag_sha(tag, sha)
+    @tag_shas ||= {}
+    @tag_shas[tag] = sha
+  end
+
+  # stub_latest_tag: scripts latest_tag(dir, pattern) for the clone whose
+  # directory basename is `dir_suffix`.
+  def stub_latest_tag(dir_suffix, tag)
+    @latest_tags ||= {}
+    @latest_tags[dir_suffix] = tag
+  end
+
+  # stub_commit_date: scripts commit_date(dir, ref) for the clone whose
+  # directory basename is `dir_suffix`, keyed on `ref`.
+  def stub_commit_date(dir_suffix, ref, date)
+    @commit_dates ||= {}
+    @commit_dates[[dir_suffix, ref]] = date
+  end
+
+  def stub_rev_parse(dir_suffix, ref, sha)
+    @rev_parses ||= {}
+    @rev_parses[[dir_suffix, ref]] = sha
   end
 
   def stub_pr_list(repo:, head: nil, base: nil, state: "open", result:)
@@ -77,6 +106,24 @@ class FakeGithub
     (@pr_create_failures ||= {})[repo] = message
   end
 
+  # stub_release_exists: scripts release_exists?(repo, tag) to return true
+  # — tests default to "absent" (false) unless a release is stubbed here.
+  def stub_release_exists(repo, tag)
+    @releases[[repo, tag]] = true
+  end
+
+  # stub_permission: scripts collaborator_permission(repo, login) to return
+  # `permission` — tests default to "write" (allowed) unless overridden.
+  def stub_permission(repo, permission)
+    @permissions[repo] = permission
+  end
+
+  # fail_pr_merge: every subsequent pr_merge(repo, number) call raises
+  # Train::Github::ApiError with `message` instead of recording a merge.
+  def fail_pr_merge(repo, number, message: "simulated merge failure")
+    @pr_merge_failures[[repo, number]] = message
+  end
+
   # ---- Github interface ----
 
   def ls_remote(dir, ref)
@@ -87,7 +134,32 @@ class FakeGithub
   def rev_parse(dir, ref = "HEAD")
     record(:rev_parse, [dir, ref])
     @rev_parses ||= {}
-    @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
+    @rev_parses[[suffix(dir), ref]] || @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
+  end
+
+  # tag_sha: resolves refs/tags/<tag> on origin — "" when the tag doesn't
+  # exist. Scriptable via stub_tag_sha; always read-only.
+  def tag_sha(dir, tag)
+    record(:tag_sha, [dir, tag])
+    @tag_shas ||= {}
+    @tag_shas[tag] || ""
+  end
+
+  # latest_tag: read-only, scriptable via stub_latest_tag; defaults to "" (no
+  # matching tag) for any clone not explicitly stubbed.
+  def latest_tag(dir, pattern)
+    record(:latest_tag, [dir, pattern])
+    @latest_tags ||= {}
+    @latest_tags[suffix(dir)] || ""
+  end
+
+  # commit_date: read-only, scriptable via stub_commit_date; defaults to a
+  # deterministic per-(dir,ref) fixture string when not explicitly stubbed,
+  # so tests that don't care about the exact date still get a stable value.
+  def commit_date(dir, ref)
+    record(:commit_date, [dir, ref])
+    @commit_dates ||= {}
+    @commit_dates[[suffix(dir), ref]] || "2026-07-01"
   end
 
   def clone(url, dest, depth: nil, filter: nil)
@@ -164,6 +236,55 @@ class FakeGithub
   def pr_merge_auto(repo:, head_or_number:)
     record(:pr_merge_auto, [], { repo: repo, head_or_number: head_or_number })
     @pr_merge_results[[repo, head_or_number]]
+  end
+
+  # collaborator_permission: read-only, so it always executes (dry-run or
+  # not), matching the real Github#collaborator_permission.
+  def collaborator_permission(repo, login)
+    record(:collaborator_permission, [repo, login])
+    @permissions[repo]
+  end
+
+  # pr_merge: mutation-gated in the real seam; the fake mirrors that by
+  # still recording the call under dry-run (same as push/commit do) but
+  # never actually flips merged state (there's no merged state to flip
+  # here — recording IS the observable effect tests assert against).
+  def pr_merge(repo, number, merge_method: "merge")
+    record(:pr_merge, [repo, number], { merge_method: merge_method })
+    if @pr_merge_failures.key?([repo, number])
+      raise ::Train::Github::ApiError, @pr_merge_failures[[repo, number]]
+    end
+
+    true
+  end
+
+  # release_exists?: read-only, so it always executes (dry-run or not),
+  # matching the real Github#release_exists? — Promote#record needs the
+  # true answer under dry-run too.
+  def release_exists?(repo, tag)
+    record(:release_exists?, [repo, tag])
+    @releases[[repo, tag]] || false
+  end
+
+  def create_release(repo, tag:, name:, body:)
+    record(:create_release, [repo], { tag: tag, name: name, body: body })
+    return if @dry_run
+
+    @releases[[repo, tag]] = true
+    @release_bodies[[repo, tag]] = body
+  end
+
+  def pr_comment(repo, number, body)
+    record(:pr_comment, [repo, number, body])
+    @pr_comments << { repo: repo, number: number, body: body } unless @dry_run
+  end
+
+  def release_body(repo, tag)
+    @release_bodies[[repo, tag]]
+  end
+
+  def pr_comments_for(repo, number)
+    @pr_comments.select { |c| c[:repo] == repo && c[:number] == number }
   end
 
   def dirty?(dir, path)

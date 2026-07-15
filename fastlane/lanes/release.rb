@@ -89,6 +89,50 @@ platform :ios do
     )
   end
 
+  desc "Stage an already-uploaded build's App Store Connect metadata (no binary upload, no submission)"
+  lane :stage_appstore do
+    setup_ci if is_ci
+    setup_app_store_connect_api_key
+
+    # Every TRAIN_* var is validated non-empty with a clear error before any
+    # ASC call — a blank version/build number would otherwise surface as an
+    # opaque deliver/Spaceship failure much later.
+    train_version = ENV.fetch("TRAIN_VERSION", "").strip
+    UI.user_error!("TRAIN_VERSION is required and must not be empty") if train_version.empty?
+
+    train_build_number = ENV.fetch("TRAIN_BUILD_NUMBER", "").strip
+    UI.user_error!("TRAIN_BUILD_NUMBER is required and must not be empty") if train_build_number.empty?
+
+    notes_dir = ENV.fetch("TRAIN_NOTES_DIR", "").strip
+    UI.user_error!("TRAIN_NOTES_DIR is required and must not be empty") if notes_dir.empty?
+    UI.user_error!("TRAIN_NOTES_DIR does not exist: #{notes_dir}") unless Dir.exist?(notes_dir)
+
+    ios_notes_path = File.join(notes_dir, "ios.md")
+    UI.user_error!("ios notes file missing: #{ios_notes_path}") unless File.readable?(ios_notes_path)
+    # ASC rejects "what's new" text over 4000 characters — truncate, don't
+    # fail a finished staging over a long changelog.
+    notes_text = File.read(ios_notes_path)[0, 4000]
+
+    review_notes_path = File.join(notes_dir, "submission-notes.md")
+    UI.user_error!("submission notes file missing: #{review_notes_path}") unless File.readable?(review_notes_path)
+    review_notes_text = File.read(review_notes_path)
+
+    deliver(
+      app_identifier: PROD_BUNDLE_ID,
+      app_version: train_version,
+      build_number: train_build_number,
+      skip_binary_upload: true,
+      skip_screenshots: true,
+      skip_app_version_update: false,
+      submit_for_review: false,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      release_notes: { "default" => notes_text, "en-US" => notes_text },
+      submission_information: { add_id_info_uses_idfa: false },
+      app_review_information: { notes: review_notes_text },
+    )
+  end
+
   # The provisioning profile name match installed for a bundle id, as published
   # in the sigh_<id>_appstore_profile-name environment variable. Falls back to
   # the conventional name if the variable is missing (e.g. a readonly run that
