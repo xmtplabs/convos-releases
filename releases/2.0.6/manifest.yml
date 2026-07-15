@@ -11,5 +11,8 @@ repos:
   xmtplabs/convos-client:
     source-sha: 4a25d9fac43c85aaa14b005157e35a99dc51f215
     release-branch: release/2.0.6
-    status: branched
-    rc: []
+    status: rc-available
+    rc:
+    - sha: 4a25d9fac43c85aaa14b005157e35a99dc51f215
+      run: https://github.com/xmtplabs/convos-client/actions/runs/29430255185
+      version-code: 29735420
