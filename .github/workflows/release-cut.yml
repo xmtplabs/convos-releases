@@ -32,9 +32,14 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-8x
     timeout-minutes: 20
     permissions:
-      contents: write   # commit manifest/notes to this repo
+      contents: read    # pushes use the bot token, not GITHUB_TOKEN
     steps:
       - uses: actions/checkout@v6
+        with:
+          # The default persisted GITHUB_TOKEN auth header overrides the
+          # bot-token push URL — pushes would authenticate as
+          # github-actions[bot], which the main ruleset does not bypass.
+          persist-credentials: false
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v33

@@ -56,7 +56,7 @@ module Train
         sha = captures.transform_values { |c| c[:sha] }
 
         if @gh.dry_run
-          print_dry_run_plan(version, sha)
+          print_dry_run_plan(version, sha, nxt)
           return Success(:dry_run)
         end
 
@@ -168,9 +168,9 @@ module Train
       Success(in_flight || version)
     end
 
-    def print_dry_run_plan(version, sha)
+    def print_dry_run_plan(version, sha, nxt)
       @out.puts "DRY RUN — plan:"
-      REPOS.each { |repo| @out.puts "  #{repo}: branch release/#{version} @ #{sha[repo]}; bump PR -> next; release PR -> main" }
+      REPOS.each { |repo| @out.puts "  #{repo}: branch release/#{version} @ #{sha[repo]}; bump PR -> #{nxt}; release PR -> main" }
       @out.puts "  convos-releases: releases/#{version}/{manifest.yml,ios.md,android.md,submission-notes.md}"
     end
 
