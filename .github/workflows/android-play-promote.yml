@@ -177,7 +177,6 @@ jobs:
           TRAIN_KEY: ${{ steps.prepare.outputs.artifact-key }}
           TRAIN_VALUE: ${{ steps.prepare.outputs.artifact-value }}
           TRAIN_NOTES_SHA: ${{ steps.prepare.outputs.notes-sha }}
-          TRAIN_KIND: ${{ steps.prepare.outputs.kind }}
           TRAIN_PR_NUMBER: ${{ inputs.pr-number }}
         run: |
           args=(promote record \
@@ -187,8 +186,7 @@ jobs:
             --key "$TRAIN_KEY" \
             --value "$TRAIN_VALUE" \
             --notes-sha "$TRAIN_NOTES_SHA" \
-            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --kind "$TRAIN_KIND")
+            --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}")
           [ -n "$TRAIN_PR_NUMBER" ] && args+=(--pr "$TRAIN_PR_NUMBER")
           train "${args[@]}"
 

@@ -51,8 +51,7 @@ module Train
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
 
         emit_outputs(
-          key: key, value: value, version: version, notes_sha: notes_sha, notes_dir: notes_dir,
-          kind: manifest_data.fetch("kind")
+          key: key, value: value, version: version, notes_sha: notes_sha, notes_dir: notes_dir
         )
 
         Success(true)
@@ -68,17 +67,26 @@ module Train
     # semantics as Append), ensures a GitHub Release exists on the APP repo
     # for `tag` (creating it from the platform notes staged by `prepare` if
     # absent), and — when `pr_number` is given — posts a staged-submission
-    # summary comment on that PR. `kind` ("release" or "hotfix") comes from
-    # the caller (prepare already read it off the manifest; threading it
-    # through a required flag avoids `record` needing its own clone just to
-    # learn this). Returns a Result: Success(true) on completion (including
-    # dry-run and no-op writes), Failure(message) if the back-merge hard-
-    # fails or the manifest write's retries are exhausted/fail hard.
-    def record(repo:, version:, tag:, key:, value:, notes_sha:, run_url:, kind:, pr_number: nil, app_dir: Dir.pwd)
+    # summary comment on that PR. The manifest's "kind" is read from the
+    # manifest itself (a fresh read-only clone, same as prepare) rather
+    # than trusted from a flag — a mis-supplied kind on a manual run would
+    # otherwise skip a hotfix's required back-merge, or open a bogus one
+    # for a release. Returns a Result: Success(true) on completion
+    # (including dry-run and no-op writes), Failure(message) if the
+    # back-merge hard-fails or the manifest write's retries are
+    # exhausted/fail hard.
+    def record(repo:, version:, tag:, key:, value:, notes_sha:, run_url:, pr_number: nil, app_dir: Dir.pwd)
       # Pre-validate BEFORE any I/O (mirrors Append#run): a bad artifact id
       # must fail fast as a Result, not surface as a Manifest::Error raised
       # from inside the StateWriter loop after a clone.
       yield assert_version_format(version)
+
+      # The tag is always v<version> (prepare mints it that way) — a
+      # mismatched pair on a manual run would promote one version in the
+      # manifest while staging a GitHub Release for another.
+      unless tag == "v#{version}"
+        return Failure("record: --tag must be v#{version}, got '#{tag}'")
+      end
 
       value_str = value.to_s
       unless value_str.match?(Manifest::POSITIVE_INT_RE)
@@ -89,6 +97,10 @@ module Train
       # directly (manual runs), where a mistyped --key would otherwise be
       # written into the manifest under the wrong artifact field.
       yield assert_key_matches_platform(repo: repo, key: key)
+
+      # Reading kind here (not from a flag) also means a nonexistent
+      # manifest fails now, before any back-merge PR is opened.
+      kind = yield read_manifest_kind(version)
 
       # Back-merge BEFORE the manifest write for a hotfix: a hard failure
       # here (repo unreachable, auth failure, etc.) must leave the manifest
@@ -116,6 +128,26 @@ module Train
       return Success(:ok) if version.match?(Versions::VERSION_RE)
 
       Failure("version must look like X.Y.Z, got '#{version}'")
+    end
+
+    # read_manifest_kind: the version's manifest "kind" via a fresh,
+    # read-only, depth-1 clone (same approach as prepare and Merge) —
+    # record decides the back-merge step from the manifest's own state,
+    # never from caller input.
+    def read_manifest_kind(version)
+      dir = Dir.mktmpdir("train-record-")
+      begin
+        @gh.clone(
+          "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git",
+          dir, depth: 1
+        )
+        mfile = File.join(dir, "releases", version, "manifest.yml")
+        return Failure("no manifest for #{version}") unless File.exist?(mfile)
+
+        Success(Manifest.read(mfile).fetch("kind"))
+      ensure
+        FileUtils.remove_entry(dir) if Dir.exist?(dir)
+      end
     end
 
     # record_promotion: the StateWriter-backed clone/mutate/commit/push
@@ -218,8 +250,8 @@ module Train
     # that produced a new artifact id for the same sha appends rather than
     # replaces (see Manifest.append_rc), so the most recent entry is the one
     # actually uploaded last. Takes the already-read manifest data (prepare
-    # reads it once, at the top of its clone block, and reuses it here AND
-    # for the "kind" output) rather than re-reading the file itself.
+    # reads it once, at the top of its clone block) rather than re-reading
+    # the file itself.
     def find_rc_entry(data, repo:, head_sha:)
       rc_list = data.dig("repos", repo, "rc") || []
       entry = rc_list.select { |e| e["sha"] == head_sha }.last
@@ -311,14 +343,13 @@ module Train
       @gh.rev_parse(clone_dir)
     end
 
-    def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:, kind:)
+    def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:)
       outputs = {
         "artifact-key" => key,
         "artifact-value" => value,
         "tag" => "v#{version}",
         "notes-sha" => notes_sha,
-        "notes-dir" => File.expand_path(notes_dir),
-        "kind" => kind
+        "notes-dir" => File.expand_path(notes_dir)
       }
 
       lines = outputs.map { |k, v| "#{k}=#{v}" }

@@ -306,7 +306,7 @@ class PromoteTest < Minitest::Test
   def record_args(overrides = {})
     {
       repo: REPO, version: VERSION, tag: "v#{VERSION}", key: "build-number", value: "421",
-      notes_sha: "notes-sha-1", run_url: "https://run/1", kind: "release", app_dir: @app_dir
+      notes_sha: "notes-sha-1", run_url: "https://run/1", app_dir: @app_dir
     }.merge(overrides)
   end
 
@@ -336,7 +336,8 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    assert_equal 1, @gh.calls_for(:clone).size
+    # Two clones: the read-only kind lookup + the StateWriter write loop.
+    assert_equal 2, @gh.calls_for(:clone).size
     assert_equal 1, @gh.calls_for(:commit).size
     assert_equal "train: promoted #{REPO}@v#{VERSION}", @gh.calls_for(:commit).first.args[1]
     assert_equal 1, @gh.calls_for(:push).size
@@ -367,6 +368,25 @@ class PromoteTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/version must look like X\.Y\.Z/, result.failure)
     refute @gh.called?(:clone)
+  end
+
+  def test_record_rejects_tag_not_matching_version_before_any_io
+    result = new_promote.record(**record_args(tag: "v9.9.9"))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/--tag must be v#{VERSION}, got 'v9\.9\.9'/, result.failure)
+    refute @gh.called?(:clone)
+  end
+
+  def test_record_reads_kind_from_the_manifest_not_caller_input
+    # No kind parameter exists anymore — a hotfix manifest triggers the
+    # back-merge purely from its own recorded kind.
+    stub_releases_clone_with_kind("hotfix")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
   end
 
   def test_record_rejects_non_integer_value_before_any_io
@@ -507,7 +527,7 @@ class PromoteTest < Minitest::Test
   def test_record_on_hotfix_manifest_opens_back_merge_pr_into_dev
     stub_releases_clone_with_kind("hotfix")
 
-    result = new_promote.record(**record_args(kind: "hotfix"))
+    result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
     back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "hotfix/#{VERSION}" }
@@ -521,7 +541,7 @@ class PromoteTest < Minitest::Test
   def test_record_on_release_manifest_does_not_open_back_merge_pr
     stub_releases_clone_with_kind("release")
 
-    result = new_promote.record(**record_args(kind: "release"))
+    result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
     refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" }, "release-kind manifest must not trigger a back-merge PR")
@@ -534,7 +554,7 @@ class PromoteTest < Minitest::Test
     stub_releases_clone_with_kind("hotfix")
     @gh.fail_pr_create(REPO, message: "simulated back-merge API failure")
 
-    result = new_promote.record(**record_args(kind: "hotfix"))
+    result = new_promote.record(**record_args)
 
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/back-merge.*#{Regexp.escape(REPO)}/i, result.failure)
@@ -549,7 +569,7 @@ class PromoteTest < Minitest::Test
     stub_releases_clone_with_kind("hotfix")
     @gh.fail_pr_create(REPO, message: "A pull request already exists for xmtplabs:hotfix/#{VERSION}.")
 
-    result = new_promote.record(**record_args(kind: "hotfix"))
+    result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
     assert @gh.called?(:push), "a tolerated back-merge outcome must still let the manifest write proceed"
@@ -559,7 +579,7 @@ class PromoteTest < Minitest::Test
     stub_releases_clone_with_kind("hotfix")
     @gh.fail_pr_create(REPO, message: "No commits between dev and hotfix/#{VERSION}")
 
-    result = new_promote.record(**record_args(kind: "hotfix"))
+    result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
     assert @gh.called?(:push), "a tolerated back-merge outcome must still let the manifest write proceed"
