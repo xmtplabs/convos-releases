@@ -28,10 +28,6 @@ class StateWriterTest < Minitest::Test
     Retriable.with_override(sleep_disabled: true) { yield }
   end
 
-  def clone_url
-    "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git"
-  end
-
   # ---- happy write ----
 
   def test_happy_write_clones_mutates_commits_and_pushes

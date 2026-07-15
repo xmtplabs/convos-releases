@@ -167,13 +167,17 @@ module Train
       @gh.pr_merge(repo, number, merge_method: "merge", expected_head_sha: head_sha)
       Success("merged ##{number}")
     rescue Github::ApiError => e
-      return Success("already merged") if merged_meanwhile?(repo, head)
+      return Success("already merged") if merged_meanwhile?(repo, head, number)
 
       Failure(e.message)
     end
 
-    def merged_meanwhile?(repo, head)
-      @gh.pr_list(repo: repo, head: head, base: "main", state: "all").any? { |pr| pr["merged_at"] }
+    # merged_meanwhile?: scoped to the PR that was just attempted — a
+    # DIFFERENT historical merged PR on the same head (a reverted and
+    # respun release branch) must not excuse this one's failure.
+    def merged_meanwhile?(repo, head, number)
+      @gh.pr_list(repo: repo, head: head, base: "main", state: "all")
+         .any? { |pr| pr["number"] == number && pr["merged_at"] }
     rescue Github::ApiError
       false
     end

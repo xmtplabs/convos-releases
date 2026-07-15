@@ -345,6 +345,22 @@ class MergeTest < Minitest::Test
     assert_match(/#{Regexp.escape(IOS)}: already merged/, @out.string)
   end
 
+  def test_merge_error_stays_a_failure_when_only_a_DIFFERENT_pr_on_the_head_was_merged
+    # A reverted-and-respun release branch has a historical merged PR on
+    # the same head — that must not excuse the CURRENT PR's merge failure.
+    both_repos_have_open_release_prs
+    @gh.fail_pr_merge(IOS, 10, message: "Head branch was modified")
+    @gh.stub_pr_list(
+      repo: IOS, head: "release/#{VERSION}", base: "main", state: "all",
+      result: [{ "number" => 5, "url" => "https://x/5", "merged_at" => "2026-07-14T00:00:00Z" }]
+    )
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/#{Regexp.escape(IOS)}: Head branch was modified/, result.failure)
+  end
+
   # ---- dry-run ----
 
   def test_dry_run_runs_permission_and_lookup_but_does_not_actually_merge

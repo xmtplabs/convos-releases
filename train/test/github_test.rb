@@ -491,6 +491,45 @@ class GithubTest < Minitest::Test
     assert_match(/\[dry-run\] create_ref/, @out.string)
   end
 
+  # ---- with_releases_clone: tmpdir lifecycle around the block ----
+
+  # stub_clone_noop: overrides Github#clone on this instance so the real
+  # with_releases_clone can run without network — the tmpdir handling is
+  # what's under test.
+  def stub_clone_noop(gh)
+    gh.define_singleton_method(:clone) { |_url, dest, **| dest }
+  end
+
+  def test_with_releases_clone_yields_dir_returns_block_value_and_cleans_up
+    gh = Train::Github.new
+    stub_clone_noop(gh)
+    seen = nil
+
+    result = gh.with_releases_clone("test-clone-") do |dir|
+      seen = dir
+      assert Dir.exist?(dir)
+      :block_value
+    end
+
+    assert_equal :block_value, result
+    refute Dir.exist?(seen), "tmpdir must be removed after the block"
+  end
+
+  def test_with_releases_clone_cleans_up_when_the_block_raises
+    gh = Train::Github.new
+    stub_clone_noop(gh)
+    seen = nil
+
+    assert_raises(RuntimeError) do
+      gh.with_releases_clone("test-clone-") do |dir|
+        seen = dir
+        raise "boom"
+      end
+    end
+
+    refute Dir.exist?(seen), "tmpdir must be removed even when the block raises"
+  end
+
   # ---- pr_merge ----
 
   def test_pr_merge_calls_octokit_with_merge_method
