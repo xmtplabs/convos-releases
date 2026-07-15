@@ -80,10 +80,14 @@ class MergeTest < Minitest::Test
     ios_call = merge_calls.find { |c| c.args[0] == IOS }
     assert_equal 10, ios_call.args[1]
     assert_equal "merge", ios_call.kwargs[:merge_method]
+    # The merge is pinned to the tip the RC gate examined — GitHub's sha
+    # guard rejects a tip that moved between lookup and merge.
+    assert_equal "tip-#{IOS}", ios_call.kwargs[:expected_head_sha]
 
     client_call = merge_calls.find { |c| c.args[0] == CLIENT }
     assert_equal 20, client_call.args[1]
     assert_equal "merge", client_call.kwargs[:merge_method]
+    assert_equal "tip-#{CLIENT}", client_call.kwargs[:expected_head_sha]
 
     assert_match(/#{Regexp.escape(IOS)}: merged #10/, @out.string)
     assert_match(/#{Regexp.escape(CLIENT)}: merged #20/, @out.string)
@@ -322,6 +326,23 @@ class MergeTest < Minitest::Test
     assert_instance_of Dry::Monads::Result::Failure, result
     assert_match(/#{Regexp.escape(IOS)}: merge conflict/, result.failure)
     assert @gh.calls_for(:pr_merge).any? { |c| c.args[0] == CLIENT }, "other repo must still be attempted"
+  end
+
+  def test_merge_error_downgrades_to_already_merged_when_a_concurrent_run_won
+    # Two conductor comments (one per repo's PR) run concurrently — the
+    # loser's pr_merge 405s, but the PR IS merged: a success-note, not a
+    # failed release.
+    both_repos_have_open_release_prs
+    @gh.fail_pr_merge(IOS, 10, message: "Pull Request is not mergeable")
+    @gh.stub_pr_list(
+      repo: IOS, head: "release/#{VERSION}", base: "main", state: "all",
+      result: [{ "number" => 10, "url" => "https://x/10", "merged_at" => "2026-07-16T00:00:00Z" }]
+    )
+
+    result = new_merge.run(version: VERSION, actor: "octocat")
+
+    assert_equal Dry::Monads::Success(:ok), result
+    assert_match(/#{Regexp.escape(IOS)}: already merged/, @out.string)
   end
 
   # ---- dry-run ----

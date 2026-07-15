@@ -321,9 +321,15 @@ module Train
     # (already merged, checks failing, conflicts, ...) surfaces as
     # ApiError — Merge#run turns that into a per-repo Failure rather than
     # letting it propagate and abort the other repo's attempt.
-    def pr_merge(repo, number, merge_method: "merge")
+    # pr_merge: expected_head_sha (when given) becomes the API's `sha`
+    # guard — GitHub rejects the merge if the branch tip moved after the
+    # caller looked it up, instead of silently merging commits the caller
+    # never examined.
+    def pr_merge(repo, number, merge_method: "merge", expected_head_sha: nil)
       mutate!("merge #{repo}##{number} (#{merge_method})", default: true) do
-        api! { client.merge_pull_request(repo, number, "", merge_method: merge_method) }
+        options = { merge_method: merge_method }
+        options[:sha] = expected_head_sha if expected_head_sha
+        api! { client.merge_pull_request(repo, number, "", options) }
         true
       end
     end

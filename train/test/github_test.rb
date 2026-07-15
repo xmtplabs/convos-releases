@@ -503,6 +503,18 @@ class GithubTest < Minitest::Test
     assert_equal({ repo: "o/r", number: 5, options: { merge_method: "merge" } }, client.instance_variable_get(:@last_merge))
   end
 
+  def test_pr_merge_pins_expected_head_sha_as_the_api_sha_guard
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    gh.pr_merge("o/r", 5, merge_method: "merge", expected_head_sha: "tip-abc")
+
+    assert_equal(
+      { repo: "o/r", number: 5, options: { merge_method: "merge", sha: "tip-abc" } },
+      client.instance_variable_get(:@last_merge)
+    )
+  end
+
   def test_pr_merge_wraps_octokit_errors_in_api_error
     client = FakeOctokitClient.new
     client.stub_merge_pull_request_error(repo: "o/r", number: 5, error_class: Octokit::UnprocessableEntity)

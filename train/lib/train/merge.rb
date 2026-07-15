@@ -132,7 +132,7 @@ module Train
         return Failure("no RC recorded for tip #{head_sha} — wait for the RC upload to finish (or check its run), then retry")
       end
 
-      merge_pr(repo: repo, number: number)
+      merge_pr(repo: repo, number: number, head: "#{kind}/#{version}", head_sha: head_sha)
     rescue Github::ApiError => e
       Failure(e.message)
     end
@@ -165,11 +165,26 @@ module Train
       Failure("no release PR for #{version} on #{repo}")
     end
 
-    def merge_pr(repo:, number:)
-      @gh.pr_merge(repo, number, merge_method: "merge")
+    # merge_pr: the merge is pinned to the tip the RC gate just examined
+    # (GitHub's `sha` guard) — a commit landing in between is rejected by
+    # the API instead of silently merged with no RC. On an API error, a
+    # re-check downgrades to a success-note when the PR turns out merged —
+    # two concurrent conductor commands (one per repo's PR; concurrency
+    # groups don't span repos) both merge both PRs, and the loser's 405
+    # would otherwise read as a failed release.
+    def merge_pr(repo:, number:, head:, head_sha:)
+      @gh.pr_merge(repo, number, merge_method: "merge", expected_head_sha: head_sha)
       Success("merged ##{number}")
     rescue Github::ApiError => e
+      return Success("already merged") if merged_meanwhile?(repo, head)
+
       Failure(e.message)
+    end
+
+    def merged_meanwhile?(repo, head)
+      @gh.pr_list(repo: repo, head: head, base: "main", state: "all").any? { |pr| pr["merged_at"] }
+    rescue Github::ApiError
+      false
     end
   end
 end

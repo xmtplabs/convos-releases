@@ -274,8 +274,8 @@ class FakeGithub
   # still recording the call under dry-run (same as push/commit do) but
   # never actually flips merged state (there's no merged state to flip
   # here — recording IS the observable effect tests assert against).
-  def pr_merge(repo, number, merge_method: "merge")
-    record(:pr_merge, [repo, number], { merge_method: merge_method })
+  def pr_merge(repo, number, merge_method: "merge", expected_head_sha: nil)
+    record(:pr_merge, [repo, number], { merge_method: merge_method, expected_head_sha: expected_head_sha })
     if @pr_merge_failures.key?([repo, number])
       raise ::Train::Github::ApiError, @pr_merge_failures[[repo, number]]
     end

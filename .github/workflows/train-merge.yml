@@ -34,9 +34,10 @@ jobs:
   merge:
     name: Merge release PRs
     runs-on: warp-ubuntu-latest-x64-8x
-    # A human plausibly comments "@convos-conductor merge" on BOTH repos'
-    # release PRs — serialize per version so the runs queue instead of
-    # racing each other's merges (the loser converges to "already merged").
+    # Serializes repeat comments on the SAME repo's PR (concurrency groups
+    # never span repos, so a comment on each repo's PR still runs two jobs
+    # concurrently — Train::Merge tolerates that race: the loser's merge
+    # re-checks and converges to "already merged").
     concurrency:
       group: train-merge-${{ inputs.version }}
       cancel-in-progress: false
