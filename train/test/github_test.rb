@@ -17,6 +17,7 @@ class FakeOctokitClient
     @search_results = Hash.new([])                # query => [item, ...]
     @create_result = nil
     @graphql_result = { errors: nil }
+    @graphql_results_queue = []
   end
 
   def stub_pull_requests(repo:, head: nil, state: "open", result:)
@@ -39,6 +40,13 @@ class FakeOctokitClient
     @graphql_result = result
   end
 
+  # stub_graphql_results: queues distinct results for successive post()
+  # calls (e.g. first attempt rejected, second attempt succeeds) — falls
+  # back to @graphql_result once the queue is exhausted.
+  def stub_graphql_results(*results)
+    @graphql_results_queue = results
+  end
+
   def pull_requests(repo, options = {})
     @pull_requests[[repo, options[:head], options[:state] || "open"]]
   end
@@ -58,7 +66,7 @@ class FakeOctokitClient
 
   def post(url, body)
     @posts << { url: url, body: body }
-    @graphql_result
+    @graphql_results_queue.empty? ? @graphql_result : @graphql_results_queue.shift
   end
 end
 
@@ -226,5 +234,30 @@ class GithubTest < Minitest::Test
     assert_equal false, ok
     assert_match(/warning.*auto-merge failed/i, @out.string)
     assert_match(/not allowed/, @out.string)
+  end
+
+  # ---- pr_merge_auto: falls back through merge methods ----
+
+  def test_pr_merge_auto_falls_back_to_merge_when_squash_not_allowed
+    # Live rehearsal finding: convos-client disallows squash merges, so the
+    # first attempt (SQUASH) is rejected with a "not allowed" GraphQL error;
+    # pr_merge_auto must retry with MERGE and succeed.
+    client = FakeOctokitClient.new
+    client.stub_pull_requests(
+      repo: "o/r", head: "o:bot/bump-1.2.0", state: "open",
+      result: [{ number: 9, node_id: "PR_kwabc", html_url: "x" }]
+    )
+    client.stub_graphql_results(
+      { errors: [{ message: "Merge method squash merging is not allowed on this repository" }] },
+      { data: { enablePullRequestAutoMerge: { pullRequest: { id: "PR_kwabc" } } } }
+    )
+    gh = Train::Github.new(client: client)
+
+    ok = gh.pr_merge_auto(repo: "o/r", head_or_number: "bot/bump-1.2.0")
+
+    assert_equal true, ok
+    assert_equal 2, client.posts.size
+    assert_includes client.posts[0][:body], "mergeMethod: SQUASH"
+    assert_includes client.posts[1][:body], "mergeMethod: MERGE"
   end
 end

@@ -9,8 +9,10 @@ module Train
   module Notes
     module_function
 
-    # default_since: 7-day fallback when no explicit --since / prior tag
-    # date is available.
+    # default_since: 7-day fallback when no explicit --since / prior
+    # manifest cut-date is available (the seed-notes CLI subcommand, or
+    # cut's own bootstrap case — the first-ever cut, with no prior
+    # manifest to derive a boundary from).
     def default_since
       (Date.today - 7).iso8601
     end

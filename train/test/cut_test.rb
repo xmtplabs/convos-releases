@@ -131,6 +131,83 @@ class CutTest < Minitest::Test
     assert_includes pr_titles, "Release 2.1.0"
   end
 
+  def test_seed_notes_since_uses_previous_trains_cut_date
+    # A prior (non-abandoned) manifest exists at cut-date "2026-07-09".
+    # Seeding for the NEW cut must use that date as `since`, not a
+    # tag/commit lookup and not the 7-day fallback.
+    prior_dir = File.join(@releases_dir, "releases", "2.0.0")
+    FileUtils.mkdir_p(prior_dir)
+    Train::Manifest.init(
+      File.join(prior_dir, "manifest.yml"), version: "2.0.0", kind: "release", cut_date: "2026-07-09",
+      repos: { "xmtplabs/convos-ios" => "old-sha", "xmtplabs/convos-client" => "old-sha" }
+    )
+    Train::Manifest.set_status(File.join(prior_dir, "manifest.yml"), "branched")
+
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+    assert_equal Dry::Monads::Success(:cut), result
+
+    since_values = @gh.calls_for(:merged_prs_since).map { |c| c.args.last }
+    assert_equal ["2026-07-09", "2026-07-09"], since_values.sort
+  end
+
+  def test_seed_notes_since_ignores_later_abandoned_manifest
+    # An abandoned manifest with a LATER cut-date than the real prior train
+    # must not win — abandoned trains aren't a real boundary.
+    prior_dir = File.join(@releases_dir, "releases", "2.0.0")
+    FileUtils.mkdir_p(prior_dir)
+    Train::Manifest.init(
+      File.join(prior_dir, "manifest.yml"), version: "2.0.0", kind: "release", cut_date: "2026-07-09",
+      repos: { "xmtplabs/convos-ios" => "old-sha", "xmtplabs/convos-client" => "old-sha" }
+    )
+    Train::Manifest.set_status(File.join(prior_dir, "manifest.yml"), "branched")
+
+    abandoned_dir = File.join(@releases_dir, "releases", "2.0.5")
+    FileUtils.mkdir_p(abandoned_dir)
+    Train::Manifest.init(
+      File.join(abandoned_dir, "manifest.yml"), version: "2.0.5", kind: "release", cut_date: "2026-07-14",
+      repos: { "xmtplabs/convos-ios" => "abandoned-sha", "xmtplabs/convos-client" => "abandoned-sha" }
+    )
+    Train::Manifest.set_status(File.join(abandoned_dir, "manifest.yml"), "abandoned")
+
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+    assert_equal Dry::Monads::Success(:cut), result
+
+    since_values = @gh.calls_for(:merged_prs_since).map { |c| c.args.last }
+    assert_equal ["2026-07-09", "2026-07-09"], since_values.sort
+  end
+
+  def test_seed_notes_since_falls_back_to_seven_days_with_no_prior_manifest
+    # Bootstrap: no prior manifest at all — seed-notes' own 7-day default
+    # applies (this is the only case where the 7-day window is expected).
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+    assert_equal Dry::Monads::Success(:cut), result
+
+    expected = Train::Notes.default_since
+    since_values = @gh.calls_for(:merged_prs_since).map { |c| c.args.last }
+    assert_equal [expected, expected], since_values.sort
+  end
+
   def test_in_flight_manifest_same_day_reconciles_instead_of_recutting
     # Simulate an interrupted cut: manifest already exists for today with
     # status:cut (never advanced past cut).

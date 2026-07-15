@@ -24,8 +24,6 @@ class FakeGithub
     @clone_fixtures = {}   # url-substring => proc(dest)
     @ls_remote = {}        # [dir_suffix, ref] => sha ("" for absent)
     @pr_lists = Hash.new { |h, k| h[k] = [] } # [repo, head, base, state] => [{...}]
-    @tags = {}              # dir_suffix => [tags]
-    @commit_dates = {}      # [dir_suffix, ref] => date
     @pushes_fail = {}       # dir_suffix => true/false
     @push_fail_countdown = Hash.new(0) # refspec => remaining failures before success
     @clone_error_countdown = Hash.new(0) # url-substring => remaining CommandErrors before success
@@ -47,14 +45,6 @@ class FakeGithub
 
   def stub_pr_list(repo:, head: nil, base: nil, state: "open", result:)
     @pr_lists[[repo, head, base, state]] = result
-  end
-
-  def stub_tags(dir_suffix, tags)
-    @tags[dir_suffix] = tags
-  end
-
-  def stub_commit_date(dir_suffix, ref, date)
-    @commit_dates[[dir_suffix, ref]] = date
   end
 
   def stub_merged_prs(repo, prs)
@@ -122,16 +112,6 @@ class FakeGithub
 
   def checkout_branch(dir, branch, sha)
     record(:checkout_branch, [dir, branch, sha])
-  end
-
-  def tags(dir, pattern)
-    record(:tags, [dir, pattern])
-    @tags[suffix(dir)] || []
-  end
-
-  def commit_date(dir, ref)
-    record(:commit_date, [dir, ref])
-    @commit_dates[[suffix(dir), ref]] || "2026-01-01"
   end
 
   def pr_list(repo:, head: nil, base: nil, state: "open")
