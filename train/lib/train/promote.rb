@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "fileutils"
-require "tmpdir"
 require "dry/monads"
 require_relative "manifest"
 require_relative "state_writer"
@@ -31,14 +30,9 @@ module Train
     def prepare(repo:, version:, merge_sha:, head_sha:, app_dir: Dir.pwd)
       yield assert_version_format(version)
 
-      dir = Dir.mktmpdir("train-promote-")
-      begin
-        @gh.clone(
-          "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git",
-          dir, depth: 1
-        )
+      @gh.with_releases_clone("train-promote-") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
-        return Failure("no manifest for #{version}") unless File.exist?(mfile)
+        next Failure("no manifest for #{version}") unless File.exist?(mfile)
 
         manifest_data = Manifest.read(mfile)
         rc = yield find_rc_entry(manifest_data, repo: repo, head_sha: head_sha)
@@ -61,8 +55,6 @@ module Train
         )
 
         Success(true)
-      ensure
-        FileUtils.remove_entry(dir) if Dir.exist?(dir)
       end
     end
 
@@ -141,18 +133,11 @@ module Train
     # record decides the back-merge step from the manifest's own state,
     # never from caller input.
     def read_manifest_kind(version)
-      dir = Dir.mktmpdir("train-record-")
-      begin
-        @gh.clone(
-          "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git",
-          dir, depth: 1
-        )
+      @gh.with_releases_clone("train-record-") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
-        return Failure("no manifest for #{version}") unless File.exist?(mfile)
+        next Failure("no manifest for #{version}") unless File.exist?(mfile)
 
         Success(Manifest.read(mfile).fetch("kind"))
-      ensure
-        FileUtils.remove_entry(dir) if Dir.exist?(dir)
       end
     end
 
@@ -227,10 +212,32 @@ module Train
       Success(:ok)
     end
 
-    NOTES_BY_REPO_SUFFIX = {
-      "convos-ios" => "ios.md",
-      "convos-client" => "android.md"
+    # Platform: the per-platform facts keyed off an app repo's name suffix.
+    #   notes_file:   the staged store-notes filename (ios.md / android.md)
+    #   artifact_key: the manifest RC key that platform's uploads use —
+    #                 convos-ios records TestFlight build numbers,
+    #                 convos-client records Play version codes
+    #   console:      the store console linked in the staged-submission comment
+    Platform = Struct.new(:notes_file, :artifact_key, :console, keyword_init: true)
+
+    PLATFORMS = {
+      "convos-ios" => Platform.new(
+        notes_file: "ios.md", artifact_key: "build-number",
+        console: "https://appstoreconnect.apple.com/apps"
+      ),
+      "convos-client" => Platform.new(
+        notes_file: "android.md", artifact_key: "version-code",
+        console: "https://play.google.com/console"
+      )
     }.freeze
+
+    # platform_for: the Platform matching `repo`'s name suffix, or nil for an
+    # unrecognized repo — every caller treats "no match" as a no-op (no notes
+    # file, no key expectation to violate, no console link) rather than an error.
+    def platform_for(repo)
+      suffix = PLATFORMS.keys.find { |s| repo.end_with?(s) }
+      suffix && PLATFORMS[suffix]
+    end
 
     # ensure_release: idempotent state check on the APP repo (not
     # convos-releases) — a release already at `tag` is left alone; an
@@ -246,8 +253,8 @@ module Train
     end
 
     def release_body(repo:, app_dir:)
-      suffix = NOTES_BY_REPO_SUFFIX.keys.find { |s| repo.end_with?(s) }
-      notes_file = suffix && File.join(app_dir, ".train-promote", NOTES_BY_REPO_SUFFIX[suffix])
+      platform = platform_for(repo)
+      notes_file = platform && File.join(app_dir, ".train-promote", platform.notes_file)
 
       if notes_file && File.exist?(notes_file)
         File.read(notes_file)
@@ -257,14 +264,8 @@ module Train
       end
     end
 
-    CONSOLE_LINKS = {
-      "convos-ios" => "https://appstoreconnect.apple.com/apps",
-      "convos-client" => "https://play.google.com/console"
-    }.freeze
-
     def post_pr_comment(repo:, tag:, version:, pr_number:)
-      suffix = CONSOLE_LINKS.keys.find { |s| repo.end_with?(s) }
-      console_link = suffix ? CONSOLE_LINKS[suffix] : nil
+      console_link = platform_for(repo)&.console
 
       lines = [
         "**#{tag} staged for submission**",
@@ -294,31 +295,19 @@ module Train
       Success([key, entry[key]])
     end
 
-    # EXPECTED_KEY_BY_REPO_SUFFIX: the artifact-key each platform's RC
-    # entries are recorded under (Append#run / append-rc's --key,
-    # ultimately the app repo's own upload workflow) — convos-ios uploads
-    # TestFlight build numbers, convos-client uploads Play version codes.
-    EXPECTED_KEY_BY_REPO_SUFFIX = {
-      "convos-ios" => "build-number",
-      "convos-client" => "version-code"
-    }.freeze
-
     # assert_key_matches_platform: guards against a manifest whose RC entry
     # was recorded under the WRONG platform's key (e.g. a copy/paste error
     # in an app repo's upload workflow, or --key passed to append-rc for the
     # wrong repo) — proceeding would silently record and stage the wrong
-    # kind of build number for `repo`. An unrecognized repo suffix is not
-    # this check's problem (no expectation to violate); the platform-suffix
-    # tables elsewhere in this class already treat that as a "no match"
-    # no-op rather than an error.
+    # kind of build number for `repo`. An unrecognized repo is not this
+    # check's problem (no expectation to violate), so platform_for's nil is a
+    # no-op pass.
     def assert_key_matches_platform(repo:, key:)
-      expected = EXPECTED_KEY_BY_REPO_SUFFIX.keys.find { |suffix| repo.end_with?(suffix) }
-      return Success(:ok) unless expected
+      platform = platform_for(repo)
+      return Success(:ok) unless platform
+      return Success(:ok) if key == platform.artifact_key
 
-      expected_key = EXPECTED_KEY_BY_REPO_SUFFIX[expected]
-      return Success(:ok) if key == expected_key
-
-      Failure("artifact key #{key} does not match #{repo} (expected #{expected_key})")
+      Failure("artifact key #{key} does not match #{repo} (expected #{platform.artifact_key})")
     end
 
     def assert_trees_match(app_dir:, merge_sha:, head_sha:)
@@ -362,12 +351,12 @@ module Train
     # marker sentence is still present at promote time, nobody edited them,
     # and staging would send the placeholder to the store listing.
     def assert_notes_edited(repo:, version:, notes_dir:)
-      suffix = NOTES_BY_REPO_SUFFIX.keys.find { |s| repo.end_with?(s) }
-      notes_file = suffix && File.join(notes_dir, NOTES_BY_REPO_SUFFIX[suffix])
+      platform = platform_for(repo)
+      notes_file = platform && File.join(notes_dir, platform.notes_file)
       return Success(:ok) unless notes_file && File.exist?(notes_file)
 
       if File.read(notes_file).include?(Notes::HOTFIX_PLACEHOLDER)
-        return Failure("releases/#{version}/#{NOTES_BY_REPO_SUFFIX[suffix]} still contains the seeded placeholder — describe the fix (pencil-edit on convos-releases main), then re-run promotion")
+        return Failure("releases/#{version}/#{platform.notes_file} still contains the seeded placeholder — describe the fix (pencil-edit on convos-releases main), then re-run promotion")
       end
 
       Success(:ok)

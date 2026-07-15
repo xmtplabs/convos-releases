@@ -60,10 +60,7 @@ module Train
     def write_once(message:)
       dir = Dir.mktmpdir("train-state-")
       begin
-        @gh.clone(
-          "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git",
-          dir, depth: 1
-        )
+        @gh.clone(@gh.releases_clone_url, dir, depth: 1)
 
         result = yield(dir)
         return result if result.is_a?(Dry::Monads::Result::Failure)

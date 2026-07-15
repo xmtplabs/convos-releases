@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "fileutils"
-require "tmpdir"
 require "dry/monads"
 require_relative "github"
 require_relative "manifest"
@@ -91,21 +89,14 @@ module Train
     # both-repos list (which would wrongly attempt the other platform: no PR
     # to find there, an avoidable Failure).
     def read_manifest(version)
-      dir = Dir.mktmpdir("train-merge-")
-      begin
-        @gh.clone(
-          "https://x-access-token:#{ENV["GH_TOKEN"]}@github.com/xmtplabs/convos-releases.git",
-          dir, depth: 1
-        )
+      @gh.with_releases_clone("train-merge-") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
-        return Failure("no manifest for #{version}") unless File.exist?(mfile)
+        next Failure("no manifest for #{version}") unless File.exist?(mfile)
 
         data = Manifest.read(mfile)
         repos = data.fetch("repos", {})
         rc_shas = repos.transform_values { |info| (info["rc"] || []).map { |e| e["sha"] } }
         Success([repos.keys, data.fetch("kind"), rc_shas])
-      ensure
-        FileUtils.remove_entry(dir) if Dir.exist?(dir)
       end
     end
 

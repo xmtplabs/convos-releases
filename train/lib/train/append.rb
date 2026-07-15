@@ -15,11 +15,6 @@ module Train
   class Append
     include Dry::Monads[:result, :do]
 
-    # PushContention: kept as an alias so any existing `rescue
-    # Train::Append::PushContention` (or reference to it) keeps working —
-    # the real class now lives on StateWriter, which owns the retry loop.
-    PushContention = StateWriter::PushContention
-
     def initialize(github:, out: $stdout)
       @gh = github
       @out = out

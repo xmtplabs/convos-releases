@@ -2,6 +2,8 @@
 
 require "open3"
 require "json"
+require "fileutils"
+require "tmpdir"
 
 module Train
   # ALL git subprocess calls AND GitHub API calls live here. Centralizing
@@ -119,6 +121,33 @@ module Train
       args += [url, dest]
       run!(args)
       dest
+    end
+
+    RELEASES_URL = "github.com/xmtplabs/convos-releases.git"
+
+    # releases_clone_url: the token-bearing convos-releases clone URL. One
+    # source of truth for the read-only readers (Merge/Promote) and the
+    # StateWriter write loop — GH_TOKEN is read at call time so dry-run /
+    # no-token paths that never clone don't require it.
+    def releases_clone_url
+      "https://x-access-token:#{ENV["GH_TOKEN"]}@#{RELEASES_URL}"
+    end
+
+    # with_releases_clone: fresh depth-1 clone of convos-releases into a
+    # tmpdir, yield the dir, then always remove the tmpdir. The read-only
+    # counterpart to StateWriter (which owns the clone/mutate/commit/push
+    # retry loop) — every reader wants whatever's CURRENT on main, so it
+    # re-clones rather than trusting a local checkout. Returns the block's
+    # value; a Dry::Monads Do-notation short-circuit inside the block unwinds
+    # through the ensure cleanly.
+    def with_releases_clone(prefix)
+      dir = Dir.mktmpdir(prefix)
+      begin
+        clone(releases_clone_url, dir, depth: 1)
+        yield dir
+      ensure
+        FileUtils.remove_entry(dir) if Dir.exist?(dir)
+      end
     end
 
     def checkout(dir, ref)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "tmpdir"
 require "train/github"
 
 # FakeGithub: a Github test double. Cut tests inject one of these instead
@@ -75,10 +76,6 @@ class FakeGithub
 
   def stub_pr_list(repo:, head: nil, base: nil, state: "open", result:)
     @pr_lists[[repo, head, base, state]] = result
-  end
-
-  def stub_merged_prs(repo, prs)
-    (@merged_prs ||= {})[repo] = prs
   end
 
   def fail_push(dir_suffix)
@@ -195,6 +192,24 @@ class FakeGithub
     dest
   end
 
+  # releases_clone_url / with_releases_clone: mirror the real seam so the
+  # read-only convos-releases readers (Merge/Promote) route through the same
+  # tmpdir + clone + cleanup lifecycle; the URL keeps the "convos-releases"
+  # substring stub_clone matches on.
+  def releases_clone_url
+    "https://x-access-token:token@github.com/xmtplabs/convos-releases.git"
+  end
+
+  def with_releases_clone(prefix)
+    dir = Dir.mktmpdir(prefix)
+    begin
+      clone(releases_clone_url, dir, depth: 1)
+      yield dir
+    ensure
+      FileUtils.remove_entry(dir) if Dir.exist?(dir)
+    end
+  end
+
   def checkout(dir, ref)
     record(:checkout, [dir, ref])
   end
@@ -214,7 +229,7 @@ class FakeGithub
 
   def merged_prs_since(repo, since)
     record(:merged_prs_since, [repo, since])
-    (@merged_prs || {})[repo] || []
+    []
   end
 
   def git_config_bot(dir)

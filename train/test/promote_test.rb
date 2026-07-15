@@ -31,24 +31,12 @@ class PromoteTest < Minitest::Test
   # write_manifest_fixture: registers the convos-releases clone fixture with
   # a manifest containing one rc entry (sha: HEAD_SHA) plus notes files.
   # rc_entries lets tests script multiple entries (e.g. last-wins).
-  def write_manifest_fixture(rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }],
-                              notes_head_sha: "notes-clone-sha")
-    @gh.stub_clone("convos-releases") do |dest|
-      mdir = File.join(dest, "releases", VERSION)
-      FileUtils.mkdir_p(mdir)
-      Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
-        repos: { REPO => "source-sha" }
-      )
-      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
-      data["repos"][REPO]["rc"] = rc_entries
-      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
-
-      File.write(File.join(mdir, "ios.md"), "## Features\n- ios note\n")
-      File.write(File.join(mdir, "android.md"), "## Features\n- android note\n")
-      File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
-
-      @gh.stub_rev_parse(File.basename(dest), "HEAD", notes_head_sha)
+  def write_manifest_fixture(gh = @gh, repo: REPO,
+                             rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }],
+                             notes_head_sha: "notes-clone-sha")
+    gh.stub_clone("convos-releases") do |dest|
+      write_manifest_fixture_into(dest, repo: repo, rc_entries: rc_entries)
+      gh.stub_rev_parse(File.basename(dest), "HEAD", notes_head_sha)
     end
   end
 
@@ -181,21 +169,11 @@ class PromoteTest < Minitest::Test
   ANDROID_REPO = "xmtplabs/convos-client"
 
   def test_supports_version_code_key
-    # version-code is the convos-client (android) key — build_args below
-    # swaps `repo:` to match, since Fix 7's artifact-key/platform check
-    # would otherwise reject version-code recorded against convos-ios.
-    write_manifest_fixture(rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }])
-    @gh.stub_clone("convos-releases") do |dest|
-      mdir = File.join(dest, "releases", VERSION)
-      FileUtils.mkdir_p(mdir)
-      Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
-        repos: { ANDROID_REPO => "source-sha" }
-      )
-      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
-      data["repos"][ANDROID_REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }]
-      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
-    end
+    # version-code is the convos-client (android) key — the fixture uses
+    # ANDROID_REPO to match, since the artifact-key/platform check would
+    # otherwise reject version-code recorded against convos-ios.
+    write_manifest_fixture(repo: ANDROID_REPO,
+                           rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }])
     stub_matching_trees
     @gh.stub_tag_sha("v#{VERSION}", "")
 
@@ -206,7 +184,7 @@ class PromoteTest < Minitest::Test
     assert_match(/artifact-value=77/, @out.string)
   end
 
-  # ---- artifact-key / platform validation (Fix 7) ----
+  # ---- artifact-key / platform validation ----
 
   def test_ios_repo_with_version_code_key_is_a_failure
     # xmtplabs/convos-ios's RC entry recorded under the WRONG platform's
@@ -222,17 +200,8 @@ class PromoteTest < Minitest::Test
   end
 
   def test_android_repo_with_build_number_key_is_a_failure
-    @gh.stub_clone("convos-releases") do |dest|
-      mdir = File.join(dest, "releases", VERSION)
-      FileUtils.mkdir_p(mdir)
-      Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
-        repos: { ANDROID_REPO => "source-sha" }
-      )
-      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
-      data["repos"][ANDROID_REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
-      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
-    end
+    write_manifest_fixture(repo: ANDROID_REPO,
+                           rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }])
 
     result = new_promote.prepare(**base_args.merge(repo: ANDROID_REPO))
 
@@ -313,11 +282,8 @@ class PromoteTest < Minitest::Test
   # ---- dry-run ----
 
   def test_dry_run_does_not_mutate_tag
-    write_manifest_fixture
-    stub_matching_trees
-    @gh.stub_tag_sha("v#{VERSION}", "")
     gh = FakeGithub.new(dry_run: true)
-    gh.stub_clone("convos-releases") { |dest| write_manifest_fixture_into(dest) }
+    write_manifest_fixture(gh)
     gh.stub_rev_parse(File.basename(@app_dir), "#{MERGE_SHA}^{tree}", "tree-x")
     gh.stub_rev_parse(File.basename(@app_dir), "#{HEAD_SHA}^{tree}", "tree-x")
     gh.stub_tag_sha("v#{VERSION}", "")
@@ -339,12 +305,13 @@ class PromoteTest < Minitest::Test
 
   # stub_releases_clone: registers the convos-releases clone fixture used by
   # `record` — a plain manifest with one repo, no rc/promoted state yet.
-  def stub_releases_clone(gh = @gh, repos: { REPO => "source-sha" })
+  # `kind:` selects release (default) vs hotfix, which drives the back-merge.
+  def stub_releases_clone(gh = @gh, kind: "release", repos: { REPO => "source-sha" })
     gh.stub_clone("convos-releases") do |dest|
       mdir = File.join(dest, "releases", VERSION)
       FileUtils.mkdir_p(mdir)
       Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: kind, cut_date: "2026-07-16",
         repos: repos
       )
     end
@@ -408,7 +375,7 @@ class PromoteTest < Minitest::Test
   def test_record_reads_kind_from_the_manifest_not_caller_input
     # No kind parameter exists anymore — a hotfix manifest triggers the
     # back-merge purely from its own recorded kind.
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
 
     result = new_promote.record(**record_args)
 
@@ -540,19 +507,8 @@ class PromoteTest < Minitest::Test
 
   # ---- back-merge (hotfix) ----
 
-  def stub_releases_clone_with_kind(kind, gh = @gh, repos: { REPO => "source-sha" })
-    gh.stub_clone("convos-releases") do |dest|
-      mdir = File.join(dest, "releases", VERSION)
-      FileUtils.mkdir_p(mdir)
-      Train::Manifest.init(
-        File.join(mdir, "manifest.yml"), version: VERSION, kind: kind, cut_date: "2026-07-16",
-        repos: repos
-      )
-    end
-  end
-
   def test_record_on_hotfix_manifest_opens_back_merge_pr_into_dev
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
 
     result = new_promote.record(**record_args)
 
@@ -566,7 +522,7 @@ class PromoteTest < Minitest::Test
   end
 
   def test_record_on_release_manifest_does_not_open_back_merge_pr
-    stub_releases_clone_with_kind("release")
+    stub_releases_clone(kind: "release")
 
     result = new_promote.record(**record_args)
 
@@ -578,7 +534,7 @@ class PromoteTest < Minitest::Test
   # real API failure must fail `record` overall and leave the manifest
   # untouched (no clone-mutate-commit-push ever happens).
   def test_record_back_merge_api_error_is_a_hard_failure_with_no_manifest_write
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
     @gh.fail_pr_create(REPO, message: "simulated back-merge API failure")
 
     result = new_promote.record(**record_args)
@@ -593,7 +549,7 @@ class PromoteTest < Minitest::Test
   # ---- back-merge: branch restored when delete-on-merge removed it ----
 
   def test_record_restores_deleted_hotfix_branch_before_back_merge
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(
       repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
@@ -612,7 +568,7 @@ class PromoteTest < Minitest::Test
   end
 
   def test_record_fails_loud_when_deleted_branch_cannot_be_restored
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all", result: [])
 
@@ -626,7 +582,7 @@ class PromoteTest < Minitest::Test
   # ---- back-merge tolerances: rerun-safe outcomes still succeed ----
 
   def test_record_back_merge_already_exists_is_tolerated_as_success
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
     @gh.fail_pr_create(REPO, message: "A pull request already exists for xmtplabs:hotfix/#{VERSION}.")
 
     result = new_promote.record(**record_args)
@@ -636,7 +592,7 @@ class PromoteTest < Minitest::Test
   end
 
   def test_record_back_merge_no_commits_between_is_tolerated_as_success
-    stub_releases_clone_with_kind("hotfix")
+    stub_releases_clone(kind: "hotfix")
     @gh.fail_pr_create(REPO, message: "No commits between dev and hotfix/#{VERSION}")
 
     result = new_promote.record(**record_args)
@@ -647,16 +603,18 @@ class PromoteTest < Minitest::Test
 
   private
 
-  def write_manifest_fixture_into(dest)
+  def write_manifest_fixture_into(dest, repo: REPO,
+                                  rc_entries: [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }])
     mdir = File.join(dest, "releases", VERSION)
     FileUtils.mkdir_p(mdir)
+    mfile = File.join(mdir, "manifest.yml")
     Train::Manifest.init(
-      File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
-      repos: { REPO => "source-sha" }
+      mfile, version: VERSION, kind: "release", cut_date: "2026-07-16",
+      repos: { repo => "source-sha" }
     )
-    data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
-    data["repos"][REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
-    Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+    data = Train::Manifest.read(mfile)
+    data["repos"][repo]["rc"] = rc_entries
+    Train::Manifest.write(mfile, data)
     File.write(File.join(mdir, "ios.md"), "## Features\n- ios note\n")
     File.write(File.join(mdir, "android.md"), "## Features\n- android note\n")
     File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
