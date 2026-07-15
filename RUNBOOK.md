@@ -66,9 +66,12 @@ The essential invariant: **manifest first, app repos second**.
    `android/gradle.properties` / `MARKETING_VERSION` in the pbxproj).
 2. In convos-releases: create `releases/x.y.z/manifest.yml` (copy a prior
    train's shape: version, kind: release, cut-date, per-repo source-sha +
-   release-branch + status: pending, rc: []), plus `ios.md`, `android.md`,
-   `submission-notes.md` (`train seed-notes --repo xmtplabs/convos-ios
-   --since <last cut-date>` prints seeded content). Commit + push to main.
+   release-branch + status: pending, rc: []), plus the notes files — seed
+   each platform from its own repo:
+   `train seed-notes --repo xmtplabs/convos-ios --since <last cut-date> > ios.md`
+   and the same with `--repo xmtplabs/convos-client > android.md`
+   (`submission-notes.md` starts as a copy of android.md under a reviewer
+   header). Commit + push to main.
 3. In each app repo: `git push origin <dev-sha>:refs/heads/release/x.y.z`.
 4. Bump dev: branch `bot/bump-<next>` from the same SHA, apply
    `train bump-version bump <checkout> <next>`, commit, push, open a PR to
@@ -80,7 +83,8 @@ The essential invariant: **manifest first, app repos second**.
 
 From the app repo checkout, on the release branch, inside its dev shell:
 
-- Android: `fastlane android play_internal` with `PROD_KEYSTORE_PATH`,
+- Android: from the `android/` directory (the Fastfile lives at
+  `android/fastlane/`): `fastlane android play_internal` with `PROD_KEYSTORE_PATH`,
   `PROD_KEYSTORE_PASSWORD`, `PROD_KEY_ALIAS`, `PROD_KEY_PASSWORD`,
   `PLAY_SERVICE_ACCOUNT_JSON_PATH` exported (values from 1Password).
 - iOS: `fastlane testflight_prod` with the App Store Connect key trio +
