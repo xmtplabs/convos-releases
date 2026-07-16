@@ -102,16 +102,15 @@ source shas must match; a hotfix branch is verified by ancestry). A
 back-merge.
 
 Sharp edges:
-- **A single-platform hotfix claims the version for both platforms.** If
-  the OTHER platform later needs a fix from the same base tag, its
-  dispatch fails reconciliation ("source-sha mismatch" — it isn't in the
-  manifest). Recovery: pencil-edit the manifest on main, adding that
-  repo's entry (`source-sha:` = `git rev-parse vx.y.z^{commit}` there,
-  `release-branch: hotfix/x.y.(z+1)`, `status: pending`, `rc: []`) plus
-  its notes file, then re-dispatch — reconcile completes the branch/PR.
+- **Both platforms hotfixing from the same base share the version.** An
+  iOS-only hotfix from v2.1.0 claims 2.1.1; a later Android dispatch from
+  the same v2.1.0 EXTENDS that train — the manifest gains Android's entry
+  and notes, then the normal branch/PR flow runs. Edited notes are never
+  clobbered. A moved base tag still fails loudly ("source-sha mismatch").
 - **The latest-tag guard is per repo.** After an iOS-only v2.1.1, a
   both-platform hotfix from v2.1.1 fails Android's guard (its latest is
-  still v2.1.0). Hotfix per platform, or wait for the next train.
+  still v2.1.0). Hotfix per platform from each repo's own latest tag;
+  patch levels re-align at the next weekly train.
 
 ## Manual cut (CI broken or off-schedule)
 
