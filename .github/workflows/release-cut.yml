@@ -64,12 +64,12 @@ jobs:
 
       # A non-empty hotfix-base-tag switches this step to `train hotfix`
       # instead of `train cut` (hotfix is dispatch-only, no force flag).
-      # A real cut emits cut-version/cut-kind step outputs (dry-run and
-      # skipped days emit nothing).
+      # A real cut announces itself in Slack (Train::Notify) — best-effort,
+      # and skipped with a note when SLACK_WEBHOOK_URL is unset.
       - name: Cut
-        id: cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_APP }}
           TRAIN_SCHEDULE: ${{ github.event.schedule }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
@@ -87,22 +87,3 @@ jobs:
             [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
           fi
           nix develop --command train "${args[@]}"
-
-      # Best-effort: a missing webhook or Slack outage must never fail (or
-      # re-run) a completed cut.
-      - name: Notify Slack
-        if: steps.cut.outputs.cut-version != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_APP }}
-          VERSION: ${{ steps.cut.outputs.cut-version }}
-          KIND: ${{ steps.cut.outputs.cut-kind }}
-        run: |
-          if [ -z "$SLACK_WEBHOOK_URL" ]; then
-            echo "::warning::SLACK_WEBHOOK_APP secret not set — skipping Slack notification"
-            exit 0
-          fi
-          payload=$(jq -n --arg v "$VERSION" --arg k "$KIND" '{
-            text: ("🚂 *\($k) \($v) cut* — release branches are open; every push uploads an RC.\n• <https://github.com/xmtplabs/convos-releases/tree/main/releases/\($v)|Release notes \($v)> — pencil-edit before merging\n• <https://github.com/xmtplabs/convos-releases/blob/main/RUNBOOK.md|Runbook>\nWhen QA passes, comment `@convos-conductor merge` on a release PR.")
-          }')
-          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" \
-            || echo "::warning::Slack notification failed"

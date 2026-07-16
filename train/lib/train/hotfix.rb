@@ -9,7 +9,7 @@ require_relative "notes"
 require_relative "github"
 require_relative "cut"
 require_relative "config"
-require_relative "outputs"
+require_relative "notify"
 
 module Train
   # Cuts a patch release (base patch+1) from the LATEST v* tag on both app
@@ -23,11 +23,12 @@ module Train
   class Hotfix
     include Dry::Monads[:result, :do]
 
-    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr)
+    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil)
       @gh = github
       @releases_dir = releases_dir
       @out = out
       @err = err
+      @notifier = notifier || Notify.new(out: out, err: err)
     end
 
     # Exactly vX.Y.Z — looser forms crash the patch arithmetic (v2.1) or
@@ -76,7 +77,7 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
-        Outputs.emit({ "cut-version" => version, "cut-kind" => "hotfix" }, out: @out)
+        @notifier.post_cut(version: version, kind: "hotfix")
         Success(:hotfixed)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)
