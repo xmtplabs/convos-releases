@@ -6,35 +6,16 @@ require_relative "manifest"
 require_relative "versions"
 
 module Train
-  # Ports the "@convos-conductor merge" command: merges the open release (or
-  # hotfix) PR for `version` on every participating app repo. Defense in
-  # depth behind the workflow's own guard — re-verifies the actor has push
-  # access on each repo before merging anything, via a real (read-only)
-  # permission check rather than trusting whoever dispatched the workflow.
-  #
-  # Participating repos are read from the version's OWN manifest (its
-  # "repos" keys), not a hardcoded Cut::REPOS — a single-platform hotfix
-  # (--repo filtered, see Hotfix) only has ONE repo in its manifest, and
-  # merging would otherwise wrongly attempt the other platform too (no PR
-  # to find there, an avoidable Failure).
-  #
-  # Two-phase: Phase 1 checks EVERY participating repo's permission before
-  # ANY merge is attempted — if any repo's gate fails, the whole run is a
-  # Failure with ZERO merges attempted anywhere (a partial merge with an
-  # unauthorized actor on one repo is worse than no merge at all). Phase 2
-  # then merges each repo that passed, using the same collect-then-report
-  # shape as Cut#ensure_all_repos so one repo's merge failure doesn't hide
-  # (or block) the other's. The combined Result is Failure if ANY repo
-  # failed, with every repo's outcome folded into the message; Success only
-  # when every repo either merged or was already merged.
+  # Merges the open release (or hotfix) PR for `version` on every
+  # participating app repo. Two-phase: gate every repo's permission before
+  # merging any (a partial merge with an unauthorized actor is worse than
+  # none). Repos come from the version's OWN manifest, so a single-platform
+  # hotfix scopes to exactly its repo.
   class Merge
     include Dry::Monads[:result, :do]
 
-    # ALLOWED_PERMISSIONS: what collaborator_permission must return for the
-    # actor to be allowed to merge — anything less (read/triage/none) is
-    # rejected even though the workflow itself is already gated, since this
-    # runs with a bot token that has write access regardless of who
-    # triggered it.
+    # Permission levels the actor must hold to merge; the bot token has write
+    # regardless of who triggered, so re-check the actor rather than trust it.
     ALLOWED_PERMISSIONS = %w[admin write maintain].freeze
 
     def initialize(github:, out: $stdout)
@@ -42,16 +23,12 @@ module Train
       @out = out
     end
 
-    # run: Success(:ok) once every participating repo either merged or was
-    # already merged; Failure(joined per-repo reasons) if any repo failed
-    # (permission gate OR merge). Under @gh.dry_run, the permission gate and
-    # PR lookup still run for real (read-only) but pr_merge's own mutate!
-    # gate no-ops the actual merge — this method never has to check dry_run
-    # itself.
+    # run: Success(:ok) once every repo merged or was already merged;
+    # Failure(joined per-repo reasons) otherwise. Under dry-run the read-only
+    # gate/lookup still run; pr_merge's own mutate! gate no-ops the merge.
     def run(version:, actor:)
-      # `version` arrives from a caller-resolved branch name and is used in
-      # file paths and branch refs — reject anything that isn't X.Y.Z
-      # before it touches either.
+      # version comes from a caller-resolved branch name and is used in paths
+      # and refs — reject anything that isn't X.Y.Z first.
       unless version.match?(Versions::VERSION_RE)
         return Failure("version must look like X.Y.Z, got '#{version}'")
       end
@@ -65,9 +42,8 @@ module Train
         return Failure(gate_failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
       end
 
-      # Phase 2: merge each repo (the version's manifest "kind" decides the
-      # branch-name prefix — release/<version> or hotfix/<version> — no
-      # blind fallback between the two).
+      # Phase 2: merge each repo; the manifest "kind" decides the branch-name
+      # prefix (release/ or hotfix/), no blind fallback.
       outcomes = repos.to_h { |repo| [repo, merge_repo(repo: repo, version: version, kind: kind, rc_shas: rc_shas[repo] || [])] }
 
       outcomes.each { |repo, result| @out.puts "#{repo}: #{describe(result)}" }
@@ -80,14 +56,8 @@ module Train
 
     private
 
-    # read_manifest: the version's OWN manifest "repos" keys + "kind" — read
-    # via a fresh, read-only, depth-1 clone of convos-releases (same
-    # approach Promote#prepare uses to read manifest state cheaply, without
-    # a StateWriter round-trip since nothing here needs to WRITE it). A
-    # single-platform hotfix (--repo filtered, see Hotfix) only has ONE repo
-    # in its manifest — merging must scope to exactly that, not a hardcoded
-    # both-repos list (which would wrongly attempt the other platform: no PR
-    # to find there, an avoidable Failure).
+    # The version's manifest "repos" keys + "kind", via a fresh read-only
+    # depth-1 clone (nothing here writes state).
     def read_manifest(version)
       @gh.with_releases_clone("train-merge-") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
@@ -104,21 +74,18 @@ module Train
       result.success? ? result.value! : result.failure
     end
 
-    # merge_repo: one repo's merge sequence (permission already gated in
-    # Phase 1) — find the PR for this version's kind-prefixed branch,
-    # check the manifest recorded an RC for its tip, then merge it.
-    # Wrapped in its own Result — including a rescue for API errors raised
-    # by the PR lookup — so nothing here ever short-circuits the OTHER
-    # repo's attempt (run() collects both regardless of outcome).
+    # One repo's merge sequence (permission already gated): find the PR for
+    # this version's kind-prefixed branch, confirm the manifest recorded an RC
+    # for its tip, then merge. Wrapped in its own Result so nothing
+    # short-circuits the other repo's attempt.
     def merge_repo(repo:, version:, kind:, rc_shas:)
       found = yield find_pr(repo: repo, version: version, kind: kind)
       return Success("already merged") if found == :already_merged
 
       number, head_sha = found
 
-      # RC gate: merging a tip whose RC upload hasn't completed (or
-      # failed) advances main with nothing promotable — promotion would
-      # only discover it afterwards, at find_rc_entry.
+      # RC gate: merging a tip with no completed RC upload advances main with
+      # nothing promotable (promotion would only discover it at find_rc_entry).
       unless rc_shas.include?(head_sha)
         return Failure("no RC recorded for tip #{head_sha} — wait for the RC upload to finish (or check its run), then retry")
       end
@@ -128,9 +95,8 @@ module Train
       Failure(e.message)
     end
 
-    # check_permission: an API failure here is a per-repo Failure, not an
-    # exception — run() folds it into the phase-1 gate report alongside any
-    # other repo's outcome instead of crashing before that report exists.
+    # An API failure here is a per-repo Failure, not an exception — folded
+    # into the phase-1 gate report rather than crashing before it exists.
     def check_permission(repo:, actor:)
       permission = @gh.collaborator_permission(repo, actor)
       return Success(permission) if ALLOWED_PERMISSIONS.include?(permission)
@@ -140,13 +106,10 @@ module Train
       Failure("permission check failed: #{e.message}")
     end
 
-    # find_pr: looks for an OPEN <kind>/<version> PR (kind is "release" or
-    # "hotfix", from the manifest — no blind fallback between the two),
-    # returning [number, head-sha]. If not open, the LATEST PR for the
-    # head decides: merged means this repo is already done (a rerun);
-    # closed-unmerged means a respun release was abandoned — an OLDER
-    # merged PR is no proof the current one landed, so that falls through
-    # to the hard failure like a truly nonexistent PR.
+    # Looks for an OPEN <kind>/<version> PR, returning [number, head-sha]. If
+    # none, the LATEST PR for the head decides: merged means already done;
+    # closed-unmerged (an abandoned respun release) falls through to failure —
+    # an older merged PR is no proof the current one landed.
     def find_pr(repo:, version:, kind:)
       head = "#{kind}/#{version}"
       open_pr = @gh.pr_list(repo: repo, head: head, base: "main", state: "open").first
@@ -158,13 +121,10 @@ module Train
       Failure("no release PR for #{version} on #{repo}")
     end
 
-    # merge_pr: the merge is pinned to the tip the RC gate just examined
-    # (GitHub's `sha` guard) — a commit landing in between is rejected by
-    # the API instead of silently merged with no RC. On an API error, a
-    # re-check downgrades to a success-note when the PR turns out merged —
-    # two concurrent conductor commands (one per repo's PR; concurrency
-    # groups don't span repos) both merge both PRs, and the loser's 405
-    # would otherwise read as a failed release.
+    # The merge is pinned to the RC-gated tip (GitHub's `sha` guard), so a
+    # commit landing in between is rejected rather than merged with no RC. On
+    # API error, a re-check downgrades to success when the PR turns out
+    # merged — the loser of two concurrent merges must not read as a failure.
     def merge_pr(repo:, number:, head:, head_sha:)
       @gh.pr_merge(repo, number, merge_method: "merge", expected_head_sha: head_sha)
       Success("merged ##{number}")
@@ -174,9 +134,8 @@ module Train
       Failure(e.message)
     end
 
-    # merged_meanwhile?: scoped to the PR that was just attempted — a
-    # DIFFERENT historical merged PR on the same head (a reverted and
-    # respun release branch) must not excuse this one's failure.
+    # Scoped to the PR just attempted — a different historical merged PR on
+    # the same head (a respun release branch) must not excuse this failure.
     def merged_meanwhile?(repo, head, number)
       @gh.pr_list(repo: repo, head: head, base: "main", state: "all")
          .any? { |pr| pr["number"] == number && pr["merged_at"] }

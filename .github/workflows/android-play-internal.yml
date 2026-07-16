@@ -1,16 +1,8 @@
 # Reusable: build convos-client prodRelease AAB and upload to the Play Store
-# internal testing track. Runs `nix develop ./` on the CALLER's checkout —
-# the caller's flake.lock pins the convos-releases fastlane package + lanes,
-# so this file only pins step orchestration.
-#
-# Prod signing + Play credentials come from the CALLER repo's `play-prod`
-# environment (declared on the job below), not from repo-level secrets —
-# PR-triggered workflows can never read them, and the environment's
-# deployment-branch policy restricts runs to dev. Only CACHIX_AUTH_TOKEN
-# arrives via `secrets: inherit`.
-#
-# versionCode is computed by the lane (commit epoch / 60); promotion beyond
-# the internal track is manual in Play Console.
+# internal testing track. Runs on the CALLER's checkout. Prod signing + Play
+# credentials come from the caller's `play-prod` environment, not repo-level
+# secrets; only CACHIX_AUTH_TOKEN arrives via `secrets: inherit`. versionCode
+# is computed by the lane (commit epoch / 60).
 name: Android Play Internal (reusable)
 
 on:
@@ -32,14 +24,12 @@ jobs:
   build:
     name: Build & upload to Play internal track
     runs-on: ${{ inputs.runner }}
-    # Serialize Play mutations at the job itself — don't rely on every
-    # caller remembering a concurrency group. Queue, never cancel.
+    # Serialize Play mutations at the job itself. Queue, never cancel.
     concurrency:
       group: play-internal-${{ github.repository }}
       cancel-in-progress: false
-    # Resolves the play-prod environment OF THE CALLER REPO: its secrets
-    # and its deployment-branch policy (release/hotfix branches; the dev
-    # stream moved to Firebase) apply to this job.
+    # Resolves the CALLER's play-prod environment: its secrets and
+    # deployment-branch policy (release/hotfix; dev moved to Firebase) apply.
     environment: play-prod
     timeout-minutes: 45
     permissions:
@@ -73,17 +63,10 @@ jobs:
           PROD_KEY_ALIAS: ${{ secrets.PROD_KEY_ALIAS }}
           PROD_KEY_PASSWORD: ${{ secrets.PROD_KEY_PASSWORD }}
           PLAY_SA_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-        # Secret values never reach the job log: stdout is redirected into
-        # the files, the shell does not echo commands, and Actions masks
-        # registered secret values anyway. printf avoids echo's escape
-        # processing on the base64 text.
-        #
-        # Guard EVERY secret, not just the decoded ones: these come from the
-        # caller's play-prod environment, and a missing/misplaced secret
-        # (e.g. still repo-level, or a typo'd environment name) yields an
-        # empty value that would otherwise fail minutes later with a cryptic
-        # gradle signing error. An empty PROD_KEY_ALIAS would silently
-        # override gradle's default alias.
+        # Secret values never reach the log (stdout redirected, no command
+        # echo, Actions masking); printf avoids echo's escape processing.
+        # Guard EVERY secret: a missing one fails minutes later with a cryptic
+        # gradle error, and an empty PROD_KEY_ALIAS silently overrides gradle's default.
         run: |
           [ -n "$PROD_KEYSTORE_B64" ] || { echo "::error::PROD_KEYSTORE_BASE64 secret is missing (check the play-prod environment)"; exit 1; }
           [ -n "$PROD_KEYSTORE_PASSWORD" ] || { echo "::error::PROD_KEYSTORE_PASSWORD secret is missing (check the play-prod environment)"; exit 1; }
@@ -110,11 +93,9 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/prod-upload.jks" "$RUNNER_TEMP/play-sa.json"
 
-      # Debugging convenience only — the deliverable is the Play release,
-      # which the lane fail-louds on. `warn` covers the no-files case;
-      # continue-on-error covers artifact-service failures. Neither may
-      # fail the job AFTER a successful Play upload — that would poison
-      # the next slot's freshness check into retrying a used versionCode.
+      # Debugging convenience only. warn + continue-on-error ensure this never
+      # fails the job after a successful Play upload — that would poison the
+      # next slot's freshness check into retrying a used versionCode.
       - name: Upload AAB artifact
         if: always()
         continue-on-error: true
@@ -125,10 +106,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Record this RC in the train manifest (release/hotfix branches only).
-      # always() + fastlane.outcome guards: record the upload even when a
-      # later Sentry/artifact step fails, but never when the upload itself
-      # didn't succeed.
+      # Record this RC (release/hotfix only). The always() + fastlane.outcome
+      # guards record even if a later step fails, but never if the upload didn't.
       - name: Record RC in train manifest
         if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
         uses: actions/create-github-app-token@v1

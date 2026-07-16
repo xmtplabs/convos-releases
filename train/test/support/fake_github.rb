@@ -4,15 +4,10 @@ require "fileutils"
 require "tmpdir"
 require "train/github"
 
-# FakeGithub: a Github test double. Cut tests inject one of these instead
-# of the real Train::Github so nothing touches the network or a real gh/git
-# binary. It records every call (for assertions) and lets tests script
-# canned responses (e.g. "ios repo is at this dev sha/version").
-#
-# clone() is faked by materializing a directory with a version fixture
-# file, since Cut#run immediately calls Versions.read/bump against
-# whatever clone() returns — a real `git clone` isn't available/desired in
-# unit tests.
+# A Github test double: records every call (for assertions) and lets tests
+# script canned responses, so nothing touches the network or a real git
+# binary. clone() materializes a directory with a version fixture file, since
+# callers immediately Versions.read/bump against it.
 class FakeGithub
   Call = Struct.new(:method, :args, :kwargs, keyword_init: false)
 
@@ -61,10 +56,7 @@ class FakeGithub
     @latest_tags[dir_suffix] = tag
   end
 
-  # stub_not_ancestor: scripts ancestor?(dir, ancestor, descendant) to
-  # return false for the clone whose directory basename is `dir_suffix` —
-  # tests default to true (any existing branch contains the asked-about
-  # sha) unless scripted here.
+  # Scripts ancestor? to return false for this clone; tests default to true.
   def stub_not_ancestor(dir_suffix)
     (@not_ancestors ||= {})[dir_suffix] = true
   end
@@ -82,11 +74,9 @@ class FakeGithub
     @pushes_fail[dir_suffix] = true
   end
 
-  # fail_push_times: the next `n` push() calls with this exact `refspec`
-  # fail (return false); calls after that succeed. Keyed on refspec rather
-  # than dir, since a fresh-clone-per-attempt caller (e.g. Append) pushes
-  # from a different tmpdir on every retry. Lets tests exercise "retry then
-  # succeed" without a permanent failure.
+  # The next `n` push() calls with this exact `refspec` fail, then succeed.
+  # Keyed on refspec since a fresh-clone-per-attempt caller pushes from a new
+  # tmpdir each retry. Exercises "retry then succeed".
   def fail_push_times(refspec, n)
     @push_fail_countdown[refspec] = n
   end
@@ -285,10 +275,8 @@ class FakeGithub
     @permissions[repo]
   end
 
-  # pr_merge: mutation-gated in the real seam; the fake mirrors that by
-  # still recording the call under dry-run (same as push/commit do) but
-  # never actually flips merged state (there's no merged state to flip
-  # here — recording IS the observable effect tests assert against).
+  # Records the call (even under dry-run, like push/commit); recording IS the
+  # observable effect tests assert against.
   def pr_merge(repo, number, merge_method: "merge", expected_head_sha: nil)
     record(:pr_merge, [repo, number], { merge_method: merge_method, expected_head_sha: expected_head_sha })
     if @pr_merge_failures.key?([repo, number])

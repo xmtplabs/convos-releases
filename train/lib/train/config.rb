@@ -6,13 +6,10 @@ require "tzinfo"
 require "tzinfo/data"
 
 module Train
-  # release-config.yml parsing + the cut "slot decision": is THIS
-  # invocation the one true daily trigger for 15:45 America/New_York?
-  #
-  # Ports the release-cut.yml "Slot / day / skip decision" step. Two cron
-  # slots exist ("45 19 * * *" and "45 20 * * *") because 15:45 ET maps to
-  # different UTC hours across DST; exactly one is correct for any given
-  # day, resolved via tzinfo rather than offset-string or ENV["TZ"] tricks.
+  # release-config.yml parsing + the cut "slot decision": is THIS invocation
+  # the one true daily trigger for 15:45 America/New_York? Two cron slots
+  # exist because 15:45 ET maps to different UTC hours across DST; exactly one
+  # is correct per day, resolved via tzinfo.
   module Config
     Decision = Struct.new(:go, :reason, keyword_init: true)
 
@@ -22,11 +19,8 @@ module Train
 
     def load(path = "release-config.yml")
       require "date"
-      # permitted_classes: [Date] — release-config.yml's skip-dates are
-      # written as bare ISO dates (e.g. "[2026-11-26]"), which YAML sniffs
-      # as native date scalars rather than strings. Normalize back to
-      # strings immediately: every comparison against "today" elsewhere in
-      # this tool is string equality (Time#strftime("%F")).
+      # permitted_classes: [Date] — bare ISO skip-dates parse as native date
+      # scalars; normalize to strings, since "today" comparisons are string equality.
       data = YAML.safe_load_file(path, permitted_classes: [Date]) || {}
       {
         "cut-day" => data.fetch("cut-day", "thursday"),
@@ -65,15 +59,9 @@ module Train
       local.hour == 15 && local.min == 45
     end
 
-    # slot_decision: does this invocation proceed?
-    #
-    # force: bypasses slot/day/skip entirely (workflow_dispatch force=true,
-    #   or --force).
-    # schedule: the raw cron slot string from github.event.schedule (nil
-    #   when not a scheduled run, e.g. workflow_dispatch without force).
-    # date: the ET calendar date to decide for (today_et, possibly
-    #   --date-overridden).
-    # config: result of Config.load.
+    # Does this invocation proceed? force bypasses slot/day/skip; schedule is
+    # the cron slot (nil off a scheduled run); date is the ET date to decide
+    # for; config is Config.load's result.
     def slot_decision(force:, schedule:, date:, config:)
       return Decision.new(go: true, reason: "Forced dispatch.") if force
 

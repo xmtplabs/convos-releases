@@ -9,13 +9,10 @@ require_relative "versions"
 require_relative "notes"
 
 module Train
-  # Ports the "Promote" step of the release train: given a merged release
-  # PR (merge_sha) and the release-branch tip it was merged from (head_sha),
-  # verify the RC that was uploaded from head_sha is the one being promoted,
-  # tag the merge commit, and stage the release notes for the next step
-  # (store submission) to consume. Runs FROM the app-repo checkout (cwd);
-  # the convos-releases clone is made internally, fresh, same as Append —
-  # so promotion always reads whatever's CURRENT on convos-releases main.
+  # The "Promote" step: given a merged release PR (merge_sha) and the branch
+  # tip it merged from (head_sha), verify the RC uploaded from head_sha, tag
+  # the merge commit, and stage release notes for store submission. Runs FROM
+  # the app-repo checkout (cwd); convos-releases is cloned fresh internally.
   class Promote
     include Dry::Monads[:result, :do]
 
@@ -58,30 +55,17 @@ module Train
       end
     end
 
-    # record: the "Record promotion" step — for a hotfix, FIRST opens the
-    # back-merge PR (hard-gated: a real API failure aborts before anything
-    # is written — see open_hotfix_back_merge_pr), THEN writes the promoted
-    # block into convos-releases' manifest (via StateWriter, same retry
-    # semantics as Append), ensures a GitHub Release exists on the APP repo
-    # for `tag` (creating it from the platform notes staged by `prepare` if
-    # absent), and — when `pr_number` is given — posts a staged-submission
-    # summary comment on that PR. The manifest's "kind" is read from the
-    # manifest itself (a fresh read-only clone, same as prepare) rather
-    # than trusted from a flag — a mis-supplied kind on a manual run would
-    # otherwise skip a hotfix's required back-merge, or open a bogus one
-    # for a release. Returns a Result: Success(true) on completion
-    # (including dry-run and no-op writes), Failure(message) if the
-    # back-merge hard-fails or the manifest write's retries are
-    # exhausted/fail hard.
+    # The "Record promotion" step: for a hotfix, opens the back-merge PR FIRST
+    # (hard-gated), then writes the promoted block to the manifest, ensures a
+    # GitHub Release on the APP repo, and (with pr_number) posts a summary
+    # comment. "kind" is read from the manifest, never trusted from a flag.
     def record(repo:, version:, tag:, key:, value:, notes_sha:, run_url:, pr_number: nil, app_dir: Dir.pwd)
-      # Pre-validate BEFORE any I/O (mirrors Append#run): a bad artifact id
-      # must fail fast as a Result, not surface as a Manifest::Error raised
-      # from inside the StateWriter loop after a clone.
+      # Pre-validate BEFORE any I/O so a bad id fails fast as a Result, not a
+      # Manifest::Error from inside the StateWriter loop.
       yield assert_version_format(version)
 
-      # The tag is always v<version> (prepare mints it that way) — a
-      # mismatched pair on a manual run would promote one version in the
-      # manifest while staging a GitHub Release for another.
+      # The tag is always v<version> — a mismatched pair on a manual run would
+      # promote one version but stage a Release for another.
       unless tag == "v#{version}"
         return Failure("record: --tag must be v#{version}, got '#{tag}'")
       end
@@ -91,21 +75,16 @@ module Train
         return Failure("record: --value must be a positive integer, got '#{value_str}'")
       end
 
-      # Same key<->platform guard as prepare: record is also invocable
-      # directly (manual runs), where a mistyped --key would otherwise be
-      # written into the manifest under the wrong artifact field.
+      # Same key<->platform guard as prepare, for direct manual runs.
       yield assert_key_matches_platform(repo: repo, key: key)
 
-      # Reading kind here (not from a flag) also means a nonexistent
-      # manifest fails now, before any back-merge PR is opened.
+      # Reading kind here also fails a nonexistent manifest before any
+      # back-merge PR is opened.
       kind = yield read_manifest_kind(version)
 
-      # Back-merge BEFORE the manifest write for a hotfix: a hard failure
-      # here (repo unreachable, auth failure, etc.) must leave the manifest
-      # untouched (no push) rather than recording a promotion whose
-      # back-merge never happened. "Already exists"/"no commits between"
-      # are expected on a rerun (the PR was already opened, or the branches
-      # are already level) and are tolerated as success-notes, not failures.
+      # Back-merge BEFORE the manifest write: a hard failure here must leave
+      # the manifest untouched rather than record a promotion whose back-merge
+      # never happened. Rerun cases are tolerated (see the method).
       yield open_hotfix_back_merge_pr(repo: repo, version: version) if kind == "hotfix"
 
       yield record_promotion(repo: repo, version: version, key: key, value: value_str, tag: tag, notes_sha: notes_sha, run_url: run_url)
@@ -119,19 +98,16 @@ module Train
 
     private
 
-    # assert_version_format: `version` arrives from a caller-resolved
-    # branch name and is used in file paths and refs — reject anything
-    # that isn't X.Y.Z before it touches either.
+    # version comes from a caller-resolved branch name and is used in paths and
+    # refs — reject anything that isn't X.Y.Z first.
     def assert_version_format(version)
       return Success(:ok) if version.match?(Versions::VERSION_RE)
 
       Failure("version must look like X.Y.Z, got '#{version}'")
     end
 
-    # read_manifest_kind: the version's manifest "kind" via a fresh,
-    # read-only, depth-1 clone (same approach as prepare and Merge) —
-    # record decides the back-merge step from the manifest's own state,
-    # never from caller input.
+    # The version's manifest "kind" via a fresh read-only depth-1 clone —
+    # record decides the back-merge from the manifest, never caller input.
     def read_manifest_kind(version)
       @gh.with_releases_clone("train-record-") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
@@ -141,10 +117,8 @@ module Train
       end
     end
 
-    # record_promotion: the StateWriter-backed clone/mutate/commit/push
-    # loop, mutating the convos-releases clone via Manifest.record_promotion.
-    # An unchanged (already-recorded) block is still a successful, no-op
-    # write.
+    # The StateWriter-backed write of the promoted block. An unchanged
+    # (already-recorded) block is still a successful no-op write.
     def record_promotion(repo:, version:, key:, value:, tag:, notes_sha:, run_url:)
       @writer.write(message: "train: promoted #{repo}@#{tag}") do |dir|
         mfile = File.join(dir, "releases", version, "manifest.yml")
@@ -155,28 +129,17 @@ module Train
       end
     end
 
-    # TOLERATED_BACK_MERGE_ERRORS: substrings (matched case-insensitively)
-    # of a back-merge pr_create ApiError that mean "this already happened,
-    # not a real failure" — a rerun after record already opened the PR
-    # ("A pull request already exists for ..."), or the hotfix branch is
-    # already fully merged into dev with nothing left to back-merge ("No
-    # commits between dev and hotfix/...").
+    # Back-merge pr_create errors (case-insensitive) that mean "already
+    # happened": the PR was opened on a prior run, or dev is already level.
     TOLERATED_BACK_MERGE_ERRORS = [
       "a pull request already exists",
       "no commits between"
     ].freeze
 
-    # open_hotfix_back_merge_pr: hard-gated — unlike the old best-effort
-    # behavior, a genuine API failure (repo unreachable, auth failure, bad
-    # credentials, etc.) now returns Failure and must abort `record` before
-    # the manifest is ever written. Only the two expected "already handled"
-    # outcomes above are downgraded to a printed note + Success.
-    #
-    # The branch is restored first if absent: delete-branch-on-merge
-    # (enabled on convos-ios) removes hotfix/<version> the moment its main
-    # PR merges, and a PR can't be opened from a deleted head — without the
-    # restore, promotion would wedge permanently (no rerun brings the
-    # branch back).
+    # Hard-gated: a genuine API failure returns Failure and aborts record
+    # before the manifest is written; only the two tolerated errors above
+    # become a Success note. The branch is restored first if absent —
+    # delete-branch-on-merge removes it, and a PR can't open from a deleted head.
     def open_hotfix_back_merge_pr(repo:, version:)
       branch = "hotfix/#{version}"
       yield restore_branch_if_deleted(repo: repo, branch: branch)
@@ -196,9 +159,8 @@ module Train
       Failure("hotfix back-merge PR failed for #{repo}: #{e.message}")
     end
 
-    # restore_branch_if_deleted: recreate hotfix/<version> at the merged
-    # PR's recorded head sha. The merged PR is the authoritative source for
-    # where the branch pointed — the tag is the MERGE commit, not the tip.
+    # Recreate hotfix/<version> at the merged PR's recorded head sha — the
+    # authoritative tip, since the tag is the MERGE commit, not the tip.
     def restore_branch_if_deleted(repo:, branch:)
       return Success(:ok) if @gh.branch_exists?(repo, branch)
 
@@ -231,20 +193,16 @@ module Train
       )
     }.freeze
 
-    # platform_for: the Platform matching `repo`'s name suffix, or nil for an
-    # unrecognized repo — every caller treats "no match" as a no-op (no notes
-    # file, no key expectation to violate, no console link) rather than an error.
+    # The Platform matching `repo`'s name suffix, or nil for an unrecognized
+    # repo — every caller treats "no match" as a no-op, not an error.
     def platform_for(repo)
       suffix = PLATFORMS.keys.find { |s| repo.end_with?(s) }
       suffix && PLATFORMS[suffix]
     end
 
-    # ensure_release: idempotent state check on the APP repo (not
-    # convos-releases) — a release already at `tag` is left alone; an
-    # absent one is created with the matching platform's staged notes as
-    # its body. Missing notes are not a hard failure (the release still
-    # gets created, just with an empty body) — a warning is printed so a
-    # silently-empty release body doesn't go unnoticed.
+    # Idempotent state check on the APP repo: a release at `tag` is left alone,
+    # an absent one is created with the platform's staged notes as its body.
+    # Missing notes warn but still create (empty body), not a hard failure.
     def ensure_release(repo:, tag:, app_dir:)
       return if @gh.release_exists?(repo, tag)
 
@@ -278,12 +236,9 @@ module Train
       @gh.pr_comment(repo, pr_number, lines.join("\n"))
     end
 
-    # find_rc_entry: the LAST rc entry recorded for head_sha wins — a rerun
-    # that produced a new artifact id for the same sha appends rather than
-    # replaces (see Manifest.append_rc), so the most recent entry is the one
-    # actually uploaded last. Takes the already-read manifest data (prepare
-    # reads it once, at the top of its clone block) rather than re-reading
-    # the file itself.
+    # The LAST rc entry for head_sha wins — a rerun appends rather than
+    # replaces, so the most recent entry is the one uploaded last. Takes the
+    # already-read manifest data rather than re-reading.
     def find_rc_entry(data, repo:, head_sha:)
       rc_list = data.dig("repos", repo, "rc") || []
       entry = rc_list.select { |e| e["sha"] == head_sha }.last
@@ -295,13 +250,9 @@ module Train
       Success([key, entry[key]])
     end
 
-    # assert_key_matches_platform: guards against a manifest whose RC entry
-    # was recorded under the WRONG platform's key (e.g. a copy/paste error
-    # in an app repo's upload workflow, or --key passed to append-rc for the
-    # wrong repo) — proceeding would silently record and stage the wrong
-    # kind of build number for `repo`. An unrecognized repo is not this
-    # check's problem (no expectation to violate), so platform_for's nil is a
-    # no-op pass.
+    # Guards against an RC entry recorded under the WRONG platform's key, which
+    # would stage the wrong kind of build number for `repo`. An unrecognized
+    # repo (platform_for nil) is a no-op pass.
     def assert_key_matches_platform(repo:, key:)
       platform = platform_for(repo)
       return Success(:ok) unless platform
@@ -318,11 +269,8 @@ module Train
       Failure("merge tree differs from RC'd branch tip — was this a merge commit of the release branch?")
     end
 
-    # ensure_tag: idempotent state check — absent tags get pushed (under
-    # dry-run, push's mutate! gate returns its `default: true` without
-    # touching origin, so this never falsely fails a dry-run); already
-    # correct is a no-op note; anywhere else is a hard failure (someone/
-    # something else claimed this tag).
+    # Idempotent state check: absent tags get pushed, already-correct is a
+    # no-op, anything else is a hard failure (something else claimed the tag).
     def ensure_tag(app_dir:, version:, merge_sha:)
       tag = "v#{version}"
       existing = @gh.tag_sha(app_dir, tag)
@@ -346,10 +294,9 @@ module Train
       Success(:ok)
     end
 
-    # assert_notes_edited: a hotfix seeds its platform notes as a
-    # describe-the-fix TEMPLATE (see Hotfix#write_seed_notes) — if the
-    # marker sentence is still present at promote time, nobody edited them,
-    # and staging would send the placeholder to the store listing.
+    # A hotfix seeds its notes as a describe-the-fix template; if the marker
+    # sentence is still present at promote time, nobody edited them and staging
+    # would send the placeholder to the store.
     def assert_notes_edited(repo:, version:, notes_dir:)
       platform = platform_for(repo)
       notes_file = platform && File.join(notes_dir, platform.notes_file)
@@ -364,10 +311,8 @@ module Train
 
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
 
-    # copy_notes: notes_dir is recreated from scratch — a leftover
-    # .train-promote from an earlier run (possible on manual/local reruns;
-    # CI checkouts are fresh) could otherwise contribute a stale file that
-    # the current release source no longer has.
+    # notes_dir is recreated from scratch — a leftover .train-promote from an
+    # earlier local rerun could otherwise contribute a stale file.
     def copy_notes(clone_dir:, version:, notes_dir:)
       FileUtils.rm_rf(notes_dir)
       FileUtils.mkdir_p(notes_dir)

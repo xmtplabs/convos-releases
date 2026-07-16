@@ -43,16 +43,14 @@ jobs:
   testflight_prod:
     name: Build & upload to TestFlight (Prod)
     runs-on: ${{ inputs.runner }}
-    # Serialize TestFlight mutations per caller repo (RC uploads now; Phase-2
-    # promotion joins the same group). Queue, never cancel.
+    # Serialize TestFlight mutations per caller repo (the promote workflow
+    # shares this group). Queue, never cancel.
     concurrency:
       group: testflight-${{ github.repository }}
       cancel-in-progress: false
-    # Resolves the testflight environment OF THE CALLER REPO: ASC API key
-    # secrets move here (off repo-level secrets) so PR-triggered workflows
-    # can never read them; the environment's deployment-branch policy
-    # restricts runs to dev/release/*/hotfix/*/main. ios-appstore-promote.yml
-    # (Phase-2 promotion) resolves the same secrets from this environment.
+    # Resolves the CALLER's testflight environment: ASC secrets live here (off
+    # repo-level) so PR-triggered workflows can't read them, and its
+    # deployment-branch policy restricts runs to dev/release/*/hotfix/*/main.
     environment: testflight
     timeout-minutes: 45
     permissions:
@@ -63,8 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # latest_testflight_build_number doesn't need history, but
-          # git rev-list --count HEAD does; the deeper of the two wins.
+          # git rev-list --count HEAD needs full history.
           fetch-depth: 0
 
       - name: Checkout convos-certificates (match repo)
@@ -126,9 +123,8 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: fastlane testflight_prod
 
-      # Sentry symbolicates prod crash reports server-side using the dSYMs
-      # from the archive (gym zips them next to the IPA). Skips cleanly when
-      # the Sentry secrets are not configured.
+      # Uploads the archive's dSYMs for server-side symbolication. Skips
+      # cleanly when the Sentry secrets aren't configured.
       - name: Upload dSYMs to Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -156,10 +152,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # Record this RC in the train manifest (release/hotfix branches only).
-      # always() + fastlane.outcome guards: record the upload even when a
-      # later Sentry/artifact step fails, but never when the upload itself
-      # didn't succeed.
+      # Record this RC (release/hotfix only). The always() + fastlane.outcome
+      # guards record even if a later step fails, but never if the upload didn't.
       - name: Record RC in train manifest
         if: always() && steps.fastlane.outcome == 'success' && (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/'))
         uses: actions/create-github-app-token@v1

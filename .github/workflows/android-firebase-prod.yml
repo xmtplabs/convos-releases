@@ -1,16 +1,8 @@
 # Reusable: build convos-client prodRelease APK and upload to Firebase App
-# Distribution. Runs `nix develop ./` on the CALLER's checkout — the caller's
-# flake.lock pins the convos-releases fastlane package + lanes, so this file
-# only pins step orchestration.
-#
-# This is the 3x/day dev-stream prod build: prod-flavor signing, existing
-# Firebase prod app, tester group xmtp-prod-internal (fixed in the lane).
-#
-# Prod signing comes from the CALLER repo's `prod-signing` environment
-# (declared on the job below), not from repo-level secrets — PR-triggered
-# workflows can never read them, and the environment's deployment-branch
-# policy restricts runs to dev. Only FIREBASE_SERVICE_ACCOUNT_JSON and
-# CACHIX_AUTH_TOKEN arrive via `secrets: inherit`.
+# Distribution. The 3x/day dev-stream prod build (prod signing, tester group
+# fixed in the lane). Runs on the CALLER's checkout. Prod signing comes from
+# the caller's `prod-signing` environment, not repo-level secrets; only
+# FIREBASE_SERVICE_ACCOUNT_JSON + CACHIX_AUTH_TOKEN arrive via `secrets: inherit`.
 name: Android Firebase Prod (reusable)
 
 on:
@@ -39,13 +31,12 @@ jobs:
   build:
     name: Build & upload to Firebase App Distribution
     runs-on: ${{ inputs.runner }}
-    # Serialize prod-signing usage at the job itself — don't rely on every
-    # caller remembering a concurrency group. Queue, never cancel.
+    # Serialize prod-signing usage at the job itself. Queue, never cancel.
     concurrency:
       group: firebase-prod-${{ github.repository }}
       cancel-in-progress: false
-    # Resolves the prod-signing environment OF THE CALLER REPO: its secrets
-    # and its deployment-branch policy (dev only) apply to this job.
+    # Resolves the CALLER's prod-signing environment: its secrets and
+    # deployment-branch policy (dev only) apply here.
     environment: prod-signing
     timeout-minutes: 45
     permissions:
@@ -79,17 +70,10 @@ jobs:
           PROD_KEY_ALIAS: ${{ secrets.PROD_KEY_ALIAS }}
           PROD_KEY_PASSWORD: ${{ secrets.PROD_KEY_PASSWORD }}
           FIREBASE_SA_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
-        # Secret values never reach the job log: stdout is redirected into
-        # the files, the shell does not echo commands, and Actions masks
-        # registered secret values anyway. printf avoids echo's escape
-        # processing on the base64 text.
-        #
-        # Guard EVERY secret, not just the decoded ones: these come from the
-        # caller's prod-signing environment, and a missing/misplaced secret
-        # (e.g. still repo-level, or a typo'd environment name) yields an
-        # empty value that would otherwise fail minutes later with a cryptic
-        # gradle signing error. An empty PROD_KEY_ALIAS would silently
-        # override gradle's default alias.
+        # Secret values never reach the log (stdout redirected, no command
+        # echo, Actions masking); printf avoids echo's escape processing.
+        # Guard EVERY secret: a missing one fails minutes later with a cryptic
+        # gradle error, and an empty PROD_KEY_ALIAS silently overrides gradle's default.
         run: |
           [ -n "$PROD_KEYSTORE_B64" ] || { echo "::error::PROD_KEYSTORE_BASE64 secret is missing (check the prod-signing environment)"; exit 1; }
           [ -n "$PROD_KEYSTORE_PASSWORD" ] || { echo "::error::PROD_KEYSTORE_PASSWORD secret is missing (check the prod-signing environment)"; exit 1; }

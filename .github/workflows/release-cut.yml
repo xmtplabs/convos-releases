@@ -1,9 +1,7 @@
-# Weekly release-branch cut for convos-ios + convos-client.
-#
-# Durable state = releases/<version>/manifest.yml (committed FIRST); every
-# step is ensure-state, so re-dispatching after any failure converges. All
-# cut logic lives in bin/train (Train::Cut) — this workflow only plumbs
-# credentials and the trigger context.
+# Weekly release-branch cut for convos-ios + convos-client. Durable state is
+# releases/<version>/manifest.yml (committed first); every step is
+# ensure-state, so re-dispatching converges. All logic lives in Train::Cut;
+# this only plumbs credentials and the trigger context.
 name: Release Cut
 
 on:
@@ -64,12 +62,8 @@ jobs:
           owner: xmtplabs
           repositories: convos-releases,convos-ios,convos-client
 
-      # All cut logic (slot/day/skip decision, in-flight recovery, capture,
-      # manifest-first, branch/PR ensure-state) lives in the tested `train`
-      # CLI — this workflow only plumbs credentials and the trigger context.
       # A non-empty hotfix-base-tag switches this step to `train hotfix`
-      # instead of `train cut` — hotfix has no force flag (dispatch-only, no
-      # slot/day/skip decision to bypass).
+      # instead of `train cut` (hotfix is dispatch-only, no force flag).
       - name: Cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}

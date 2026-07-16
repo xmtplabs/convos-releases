@@ -9,10 +9,8 @@ module Train
   module Manifest
     class Error < StandardError; end
 
-    # POSITIVE_INT_RE: single source of truth for "positive integer" as
-    # accepted by append_rc's id-value (build-number/version-code). Used
-    # here AND by Append#run so both entry points reject the same things —
-    # notably "0"/"000", which `/\A[0-9]+\z/` would have let through.
+    # Single source of truth for "positive integer" (build-number/version-code),
+    # used here and by Append#run. Rejects "0"/"000", unlike `/\A[0-9]+\z/`.
     POSITIVE_INT_RE = /\A[1-9][0-9]*\z/.freeze
 
     module_function
@@ -44,11 +42,8 @@ module Train
       data
     end
 
-    # append_rc: idempotent per (sha, key, VALUE). A rerun that produced a
-    # NEW artifact id (e.g. a fresh TestFlight build number for the same
-    # sha) must be recorded; only an exact duplicate is skipped. value must
-    # be a positive integer — the bash rejects anything else because it
-    # gets interpolated unquoted into a yq expression as a yaml int.
+    # Idempotent per (sha, key, value): a rerun with a NEW artifact id for the
+    # same sha is recorded; only an exact duplicate is skipped.
     def append_rc(file, repo:, sha:, run:, key:, value:)
       int_value = validate_integer!(value)
 
@@ -62,12 +57,8 @@ module Train
       end
 
       repo_data["rc"] << { "sha" => sha, "run" => run, key => int_value }
-      # Only advance status to "rc-available" if the repo hasn't already
-      # been promoted — a late/stray RC upload (CI retry, manual rerun)
-      # landing after promotion must still be RECORDED (the rc entry itself
-      # always appends) but must never downgrade "promoted" back to
-      # "rc-available"; that would misrepresent a promoted repo as still
-      # awaiting promotion.
+      # Don't downgrade "promoted" back to "rc-available": a stray RC landing
+      # after promotion is still recorded, but must not misrepresent status.
       repo_data["status"] = "rc-available" unless repo_data["status"] == "promoted"
       write(file, data)
       :appended
@@ -83,11 +74,9 @@ module Train
       data
     end
 
-    # set_status: top-level "status" writer (mirrors set_repo_status). Cut
-    # uses this to advance a manifest past "cut" once every repo's ensure
-    # has succeeded — reconcile_in_flight only treats status:"cut" as
-    # in-flight, so a manifest stuck at "cut" forever would block every
-    # subsequent week's cut.
+    # Top-level "status" writer. Cut advances a manifest past "cut" once every
+    # repo's ensure succeeds — reconcile_in_flight treats "cut" as in-flight,
+    # so a manifest stuck there would block every subsequent cut.
     def set_status(file, status)
       data = read(file)
       data["status"] = status
@@ -95,15 +84,10 @@ module Train
       data
     end
 
-    # record_promotion: writes the per-repo "promoted" block (artifact
-    # key/value, tag, notes-sha, run) and flips that repo's status to
-    # "promoted". Advances the TOP-LEVEL status to "promoted" only once
-    # EVERY repo under "repos" carries a promoted block — mirrors
-    # set_status's cut->branched advance in cut.rb, but gated on full
-    # completion rather than a single ensure_all_repos result. Idempotent:
-    # an identical existing block is a no-op (returns false) so a rerun of
-    # `train promote prepare` against an already-promoted repo doesn't
-    # rewrite (and re-commit) an unchanged manifest.
+    # Writes the per-repo "promoted" block and flips that repo's status to
+    # "promoted"; advances the TOP-LEVEL status only once EVERY repo carries a
+    # promoted block. Idempotent: an identical existing block is a no-op
+    # (returns false) so a rerun doesn't re-commit an unchanged manifest.
     def record_promotion(file, repo:, key:, value:, tag:, notes_sha:, run:)
       int_value = validate_integer!(value)
 
@@ -124,11 +108,8 @@ module Train
     end
 
     def read(file)
-      # permitted_classes: [Date] — a human hand-editing cut-date via the
-      # GitHub web pencil (design spec shows it unquoted, e.g.
-      # "cut-date: 2026-07-16") produces a native YAML date scalar rather
-      # than a string; normalize back to the ISO string the rest of the
-      # tool compares against.
+      # permitted_classes: [Date] — an unquoted hand-edited cut-date parses as
+      # a native YAML date; normalize back to the ISO string the tool compares.
       data = YAML.safe_load_file(file, permitted_classes: [Date]) || {}
       normalize_dates!(data)
       data

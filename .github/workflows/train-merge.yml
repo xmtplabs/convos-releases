@@ -1,14 +1,7 @@
-# Reusable: merge the open release (or hotfix) PR for `version` on BOTH app
-# repos, on behalf of `actor`. Invoked by the @convos-conductor merge
-# command (a caller workflow triggered from repository_dispatch / a PR
-# comment, outside this repo) — the caller resolves `actor` from whoever
-# issued the command and passes it through so train/lib/train/merge.rb can
-# re-verify write access before merging anything, independent of whatever
-# gate the caller itself applies.
-#
-# All merge logic (permission check, PR lookup incl. hotfix fallback,
-# merge, per-repo collect-don't-short-circuit reporting) lives in the tested
-# `train` CLI (Train::Merge) — this workflow only plumbs credentials.
+# Reusable: merge the open release (or hotfix) PR for `version` on both app
+# repos, on behalf of `actor`. The caller resolves `actor` and passes it
+# through so Train::Merge can re-verify write access before merging. All
+# merge logic lives in the tested `train` CLI; this only plumbs credentials.
 name: Train Merge (reusable)
 
 on:
@@ -34,10 +27,9 @@ jobs:
   merge:
     name: Merge release PRs
     runs-on: warp-ubuntu-latest-x64-8x
-    # Serializes repeat comments on the SAME repo's PR (concurrency groups
-    # never span repos, so a comment on each repo's PR still runs two jobs
-    # concurrently — Train::Merge tolerates that race: the loser's merge
-    # re-checks and converges to "already merged").
+    # Serializes repeat comments on the same repo's PR. Groups don't span
+    # repos, so two repos' PRs run concurrently — Train::Merge tolerates that
+    # race (the loser converges to "already merged").
     concurrency:
       group: train-merge-${{ inputs.version }}
       cancel-in-progress: false
@@ -47,9 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # No pushes happen in this job (the merge itself is a GitHub API
-          # call via the bot token, not a git push) — persist-credentials:
-          # false anyway, matching every other reusable workflow's stance.
+          # No pushes here (the merge is an API call), but persist-credentials:
+          # false anyway, matching every other reusable workflow.
           persist-credentials: false
 
       - name: Install Nix
@@ -79,11 +70,9 @@ jobs:
           repositories: convos-releases,convos-ios,convos-client
 
       - name: train merge
-        # Inputs flow through env vars, not inline ${{ }} interpolation —
-        # `version` derives from a PR head-branch name and `actor` from a
-        # comment author, both externally influenced; interpolating them
-        # into the script text would allow shell injection with the bot
-        # token in scope.
+        # Inputs flow through env vars, not inline ${{ }} — version and actor
+        # are externally influenced; interpolating them into the script would
+        # allow shell injection with the bot token in scope.
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           TRAIN_VERSION: ${{ inputs.version }}

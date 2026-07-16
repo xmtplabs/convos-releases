@@ -11,23 +11,14 @@ require_relative "cut"
 require_relative "config"
 
 module Train
-  # Ports a hotfix train: given the LATEST v* release tag on both app repos,
-  # cuts a patch release (base patch+1) from that tag rather than from dev.
-  # Runs FROM a checkout of convos-releases (cwd), same as Cut — this class
-  # commits directly in that checkout (no StateWriter; StateWriter is for
-  # Append/Promote's "clone fresh per attempt, retry on push contention"
-  # loop, which hotfix.rb doesn't need any more than cut.rb does — both run
-  # once, from release-cut.yml, with nothing else concurrently writing the
-  # SAME version's manifest).
+  # Cuts a patch release (base patch+1) from the LATEST v* tag on both app
+  # repos rather than from dev. Runs FROM a checkout of convos-releases (cwd)
+  # and commits directly there, like Cut.
   #
-  # Unlike Cut, there's no "agree on version" step: the version is derived
-  # purely from --base-tag arithmetic. There IS reconcile mode, though,
-  # mirroring Cut's manifest-first + ensure-state approach: if
-  # releases/<version>/manifest.yml already exists, #run verifies it's a
-  # "hotfix"-kind manifest with source-shas matching the freshly captured
-  # tag shas (else a loud Failure — see #reconcile_manifest), then proceeds
-  # straight to the per-repo branch/PR ensure-state steps rather than
-  # re-initializing the manifest/notes/commit.
+  # Version comes purely from --base-tag arithmetic (no "agree on version"
+  # step). Reconcile mode: if the manifest already exists, #run verifies it's
+  # "hotfix"-kind with matching source-shas, then proceeds straight to the
+  # per-repo branch/PR ensure-state steps.
   class Hotfix
     include Dry::Monads[:result, :do]
 
@@ -38,8 +29,8 @@ module Train
       @err = err
     end
 
-    # BASE_TAG_RE: exactly vX.Y.Z — anything looser either crashes the
-    # patch arithmetic (v2.1) or silently drops components (v2.1.0.5).
+    # Exactly vX.Y.Z — looser forms crash the patch arithmetic (v2.1) or
+    # silently drop components (v2.1.0.5).
     BASE_TAG_RE = /\Av\d+\.\d+\.\d+\z/
 
     # run: Success(:dry_run | :hotfixed) or Failure(message).
@@ -91,8 +82,7 @@ module Train
 
     private
 
-    # guard_ref: identical guard to Cut#guard_ref (4 lines) — not worth
-    # extracting to a shared module for this little duplication.
+    # Identical to Cut#guard_ref; too little to bother sharing.
     def guard_ref
       ref = ENV["GITHUB_REF_NAME"]
       return Success(:ok) unless ref && ref != "main"
@@ -117,10 +107,9 @@ module Train
       @gh.set_remote_url(@releases_dir, "https://x-access-token:#{token}@github.com/xmtplabs/convos-releases.git")
     end
 
-    # capture_repos: clones each participating repo (blob:none — tag history
-    # included), verifies base_tag is that repo's LATEST v* tag, and
-    # captures the tag's commit sha. Any single repo's tag mismatch fails
-    # the whole run before any manifest/branch mutation happens elsewhere.
+    # Clones each repo (blob:none keeps tag history), verifies base_tag is its
+    # LATEST v* tag, and captures the tag's commit sha. Any tag mismatch fails
+    # the whole run before anything is mutated.
     def capture_repos(work:, repos:, base_tag:)
       captures = {}
       repos.each do |repo|
@@ -152,19 +141,11 @@ module Train
       files
     end
 
-    # reconcile_manifest: a manifest already exists for this version — this
-    # is either a rerun after a partial failure (branch push failed, PR
-    # creation failed, etc.) or a genuine collision (someone else claimed
-    # this version with a DIFFERENT kind/source). Only the former is safe to
-    # proceed with: kind must be "hotfix" (a release-kind manifest at the
-    # same version is a hard collision) AND every participating repo's
-    # recorded source-sha must match what was JUST captured from the
-    # tag — a mismatch means base_tag moved (a new tag was pushed) since the
-    # first attempt, and blindly continuing would branch/PR against the
-    # wrong commit. On match, returns the RECORDED source-shas (not the
-    # freshly captured ones — they're identical when this check passes, but
-    # recorded is the authoritative value the rest of the pipeline, and any
-    # already-created branches, are keyed on).
+    # A manifest already exists: safe to proceed only if it's a rerun, not a
+    # collision. Requires kind "hotfix" and every recorded source-sha to match
+    # what was just captured (a mismatch means base_tag moved). Returns the
+    # RECORDED shas — the authoritative value already-created branches are
+    # keyed on.
     def reconcile_manifest(mfile:, version:, repos:, sha:)
       data = Manifest.read(mfile)
 
@@ -198,13 +179,10 @@ module Train
       Success(:ok)
     end
 
-    # write_seed_notes: seeds a describe-the-fix TEMPLATE per participating
-    # platform file (ios.md for convos-ios, android.md for convos-client),
-    # not PR-derived notes like Cut — at cut time the hotfix branch is just
-    # the base tag plus a bump commit, and dev PRs merged since that tag are
-    # NOT on the branch, so seeding from them would describe changes the
-    # hotfix doesn't contain. The human cherry-picking the fix describes it
-    # here (same pencil-edit flow as regular release notes).
+    # Seeds a describe-the-fix TEMPLATE per platform file, not PR-derived notes
+    # like Cut — the hotfix branch is just the base tag plus a bump commit, so
+    # dev PRs since that tag aren't on it. The human cherry-picking the fix
+    # fills these in (same pencil-edit flow as regular release notes).
     def write_seed_notes(mdir:, repos:, base_tag:)
       template = +"# Hotfix from #{base_tag}\n\n"
       template << "_#{Notes::HOTFIX_PLACEHOLDER}; this file becomes the store release notes._\n"
@@ -219,9 +197,8 @@ module Train
       File.write(File.join(mdir, "submission-notes.md"), submission)
     end
 
-    # branch_and_pr_all_repos: runs each repo's branch+PR steps independently
-    # and collects Success/Failure per repo, mirroring Cut#ensure_all_repos —
-    # a failure on one repo doesn't hide the other's outcome.
+    # Runs each repo's branch+PR steps independently, collecting per-repo
+    # outcomes so one failure doesn't hide another's (mirrors Cut#ensure_all_repos).
     def branch_and_pr_all_repos(work:, version:, repos:, sha:)
       outcomes = repos.to_h { |repo| [repo, branch_and_pr_repo(work: work, repo: repo, version: version, sha: sha[repo])] }
 
@@ -236,28 +213,10 @@ module Train
       Failure(failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
     end
 
-    # branch_and_pr_repo: ensure-state, mirroring Cut#ensure_release_branch +
-    # Cut#ensure_release_pr — a rerun (reconcile mode) must converge rather
-    # than re-push a branch that already exists or re-create a PR that's
-    # already open/merged. The branch step: if hotfix/<version> doesn't
-    # exist on origin yet, create it LOCALLY at the tag's sha, bump the
-    # patch version, commit, and push ONCE — so the branch's tip on origin
-    # is the bump commit, and the tag's already-uploaded commit is never
-    # rebuilt as a "new" RC. Unlike Cut's release branch (whose tip stays AT
-    # the captured sha, so a later ls_remote can compare directly), this
-    # branch's tip is the freshly-created bump COMMIT on top of the tag's
-    # sha — there's no recorded "expected tip" to compare a rerun's
-    # ls_remote against. An existing ref is instead sanity-checked by
-    # ANCESTRY: its tip must contain the captured tag sha (true for our
-    # own bump commit and any cherry-picks since). This catches a branch
-    # pointing at unrelated history, though not every foreign branch — a
-    # tip cut from main after the release merge also contains the tag.
-    # Unlike Cut's release-PR step,
-    # PR creation here is NOT best-effort — a dispatch-triggered hotfix has
-    # a human watching, so a failure here must fail the whole repo loud
-    # rather than silently leave no PR. An already-open PR is a no-op note;
-    # an already-merged PR (state "all", tolerated) is also a no-op note —
-    # both mean this repo's ensure is already done.
+    # Ensure-state: reruns converge. An existing branch is verified by ancestry
+    # (its tip must contain the captured tag sha) since the bump commit means
+    # there's no recorded expected tip. PR creation fails loud — a dispatched
+    # hotfix has a human watching.
     def branch_and_pr_repo(work:, repo:, version:, sha:)
       dir = File.join(work, repo.split("/").last)
       branch = "hotfix/#{version}"
@@ -322,8 +281,7 @@ module Train
       BODY
     end
 
-    # persist_statuses: best-effort; "pending" is the conservative truthful
-    # state if this push loses a race. Mirrors Cut#persist_statuses.
+    # Best-effort; "pending" is the truthful state if this push loses a race.
     def persist_statuses(mdir, version)
       return unless @gh.dirty?(@releases_dir, mdir)
 

@@ -14,9 +14,8 @@ def fail_loud(message)
   exit 1
 end
 
-# unwrap_result: the single place a Train::Cut/Append Result becomes an exit
-# code. Failure prints the message and exits 1; any Success (including the
-# "declined, not cut time" Success(:skipped) variant) exits 0.
+# The single place a Result becomes an exit code: Failure prints and exits 1,
+# any Success (including Success(:skipped)) exits 0.
 def unwrap_result(result)
   case result
   when Dry::Monads::Success

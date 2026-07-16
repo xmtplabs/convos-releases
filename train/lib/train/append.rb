@@ -5,13 +5,9 @@ require_relative "manifest"
 require_relative "state_writer"
 
 module Train
-  # Ports the "Append manifest entry" steps in android-play-internal.yml /
-  # ios-testflight-prod.yml. Always clones convos-releases fresh (even if
-  # cwd happens to already be a checkout with the manifest) — matching the
-  # bash exactly, because the whole point is to append against whatever is
-  # CURRENT on main, not a possibly-stale local checkout. The actual
-  # clone/commit/push retry loop lives in StateWriter; this class just
-  # supplies the "mutate the clone" block.
+  # Records an uploaded RC's artifact id in the version's manifest, always
+  # against whatever is CURRENT on convos-releases main (StateWriter clones
+  # fresh per attempt); this class just supplies the mutate block.
   class Append
     include Dry::Monads[:result, :do]
 
