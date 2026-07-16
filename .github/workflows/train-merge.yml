@@ -1,0 +1,81 @@
+# Reusable: merge the open release (or hotfix) PR for `version` on both app
+# repos, on behalf of `actor`. The caller resolves `actor` and passes it
+# through so Train::Merge can re-verify write access before merging. All
+# merge logic lives in the tested `train` CLI; this only plumbs credentials.
+name: Train Merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release (or hotfix) version (X.Y.Z) to merge
+        type: string
+        required: true
+      actor:
+        description: GitHub login requesting the merge (permission-gated)
+        type: string
+        required: true
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: true
+      RELEASES_BOT_APP_ID:
+        required: true
+      RELEASES_BOT_PRIVATE_KEY:
+        required: true
+
+jobs:
+  merge:
+    name: Merge release PRs
+    runs-on: warp-ubuntu-latest-x64-8x
+    # Serializes repeat comments on the same repo's PR. Groups don't span
+    # repos, so two repos' PRs run concurrently — Train::Merge tolerates that
+    # race (the loser converges to "already merged").
+    concurrency:
+      group: train-merge-${{ inputs.version }}
+      cancel-in-progress: false
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # No pushes here (the merge is an API call), but persist-credentials:
+          # false anyway, matching every other reusable workflow.
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Set up xmtp Cachix cache
+        uses: cachix/cachix-action@v15
+        with:
+          name: xmtp
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Enter dev shell
+        uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: "--accept-flake-config"
+
+      - name: Mint bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases,convos-ios,convos-client
+
+      - name: train merge
+        # Inputs flow through env vars, not inline ${{ }} — version and actor
+        # are externally influenced; interpolating them into the script would
+        # allow shell injection with the bot token in scope.
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_VERSION: ${{ inputs.version }}
+          TRAIN_ACTOR: ${{ inputs.actor }}
+        run: |
+          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR"

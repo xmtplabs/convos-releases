@@ -1,9 +1,7 @@
-# Weekly release-branch cut for convos-ios + convos-client.
-#
-# Durable state = releases/<version>/manifest.yml (committed FIRST); every
-# step is ensure-state, so re-dispatching after any failure converges. All
-# cut logic lives in bin/train (Train::Cut) — this workflow only plumbs
-# credentials and the trigger context.
+# Weekly release-branch cut for convos-ios + convos-client. Durable state is
+# releases/<version>/manifest.yml (committed first); every step is
+# ensure-state, so re-dispatching converges. All logic lives in Train::Cut;
+# this only plumbs credentials and the trigger context.
 name: Release Cut
 
 on:
@@ -22,6 +20,14 @@ on:
         description: Print the plan, mutate nothing
         type: boolean
         default: false
+      hotfix-base-tag:
+        description: "Cut a hotfix from this tag instead (vX.Y.Z); leave empty for a normal cut"
+        type: string
+        default: ""
+      hotfix-repo:
+        description: "optional single repo OWNER/NAME for a one-platform hotfix"
+        type: string
+        default: ""
 
 concurrency:
   group: release-train
@@ -56,18 +62,25 @@ jobs:
           owner: xmtplabs
           repositories: convos-releases,convos-ios,convos-client
 
-      # All cut logic (slot/day/skip decision, in-flight recovery, capture,
-      # manifest-first, branch/PR ensure-state) lives in the tested `train`
-      # CLI — this workflow only plumbs credentials and the trigger context.
+      # A non-empty hotfix-base-tag switches this step to `train hotfix`
+      # instead of `train cut` (hotfix is dispatch-only, no force flag).
       - name: Cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           TRAIN_SCHEDULE: ${{ github.event.schedule }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
+          TRAIN_HOTFIX_BASE_TAG: ${{ inputs.hotfix-base-tag || '' }}
+          TRAIN_HOTFIX_REPO: ${{ inputs.hotfix-repo || '' }}
         run: |
-          args=(cut)
-          [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")
-          [ "$TRAIN_FORCE" = "true" ] && args+=(--force)
-          [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          if [ -n "$TRAIN_HOTFIX_BASE_TAG" ]; then
+            args=(hotfix --base-tag "$TRAIN_HOTFIX_BASE_TAG")
+            [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+            [ -n "$TRAIN_HOTFIX_REPO" ] && args+=(--repo "$TRAIN_HOTFIX_REPO")
+          else
+            args=(cut)
+            [ -n "$TRAIN_SCHEDULE" ] && args+=(--schedule "$TRAIN_SCHEDULE")
+            [ "$TRAIN_FORCE" = "true" ] && args+=(--force)
+            [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)
+          fi
           nix develop --command train "${args[@]}"

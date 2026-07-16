@@ -24,5 +24,5 @@ jobs:
       - name: Lint workflows
         run: |
           nix run nixpkgs#actionlint -- \
-            -ignore 'property "(prod_keystore_base64|prod_keystore_password|prod_key_alias|prod_key_password|play_service_account_json|releases_bot_app_id|releases_bot_private_key)" is not defined in object type' \
+            -ignore 'property "(prod_keystore_base64|prod_keystore_password|prod_key_alias|prod_key_password|play_service_account_json|app_store_connect_api_key_id|app_store_connect_issuer_id|app_store_connect_api_private_key|releases_bot_app_id|releases_bot_private_key)" is not defined in object type' \
             .github/workflows/*.yml

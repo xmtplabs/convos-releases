@@ -92,6 +92,28 @@ class ManifestTest < Minitest::Test
     assert_equal 2, rc.size
   end
 
+  def test_append_rc_after_promotion_keeps_status_promoted
+    # A late/stray RC upload (CI retry, manual rerun) landing after the repo
+    # was already promoted must still record the rc entry, but must NOT
+    # downgrade status back to "rc-available" — that would misrepresent an
+    # already-promoted repo as still awaiting promotion.
+    init_with_one_repo
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+
+    result = Train::Manifest.append_rc(
+      file, repo: "xmtplabs/convos-ios", sha: "abc123", run: "https://run/2", key: "build-number", value: "999"
+    )
+    assert_equal :appended, result
+
+    data = Train::Manifest.read(file)
+    repo = data["repos"]["xmtplabs/convos-ios"]
+    assert_equal "promoted", repo["status"], "a late RC append must not downgrade a promoted repo's status"
+    assert(repo["rc"].any? { |e| e["sha"] == "abc123" && e["build-number"] == 999 }, "the rc entry must still be recorded")
+  end
+
   def test_append_rc_rejects_non_integer_values
     init_with_one_repo
     ["", "abc", "4.21", "-1", "1a", " 1", "0", "000"].each do |bad|
@@ -140,6 +162,68 @@ class ManifestTest < Minitest::Test
     refute_match(/cut_date/, raw)
     refute_match(/sourceSha/, raw)
     refute_match(/source_sha/, raw)
+  end
+
+  # ---- record_promotion ----
+
+  def test_record_promotion_writes_promoted_block_and_repo_status
+    init_with_one_repo
+    changed = Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    assert_equal true, changed
+
+    data = Train::Manifest.read(file)
+    repo = data["repos"]["xmtplabs/convos-ios"]
+    assert_equal "promoted", repo["status"]
+    assert_equal({
+      "build-number" => 421, "tag" => "v2.1.0", "notes-sha" => "notes-sha-1", "run" => "https://run/1"
+    }, repo["promoted"])
+  end
+
+  def test_record_promotion_sets_top_level_status_only_when_every_repo_promoted
+    Train::Manifest.init(
+      file, version: "2.1.0", kind: "release", cut_date: "2026-07-16",
+      repos: { "xmtplabs/convos-ios" => "sha-ios", "xmtplabs/convos-client" => "sha-client" }
+    )
+
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    data = Train::Manifest.read(file)
+    refute_equal "promoted", data["status"], "top-level status must not flip until every repo is promoted"
+
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-client", key: "version-code", value: "77",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/2"
+    )
+    data = Train::Manifest.read(file)
+    assert_equal "promoted", data["status"]
+  end
+
+  def test_record_promotion_is_idempotent_for_identical_block
+    init_with_one_repo
+    Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    changed = Train::Manifest.record_promotion(
+      file, repo: "xmtplabs/convos-ios", key: "build-number", value: "421",
+      tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+    )
+    assert_equal false, changed
+  end
+
+  def test_record_promotion_rejects_non_integer_value
+    init_with_one_repo
+    assert_raises(Train::Manifest::Error) do
+      Train::Manifest.record_promotion(
+        file, repo: "xmtplabs/convos-ios", key: "build-number", value: "abc",
+        tag: "v2.1.0", notes_sha: "notes-sha-1", run: "https://run/1"
+      )
+    end
   end
 
   private

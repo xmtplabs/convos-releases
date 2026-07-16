@@ -10,16 +10,12 @@ require_relative "notes"
 require_relative "github"
 
 module Train
-  # Ports the release-cut.yml "Cut" step. Runs FROM a checkout of
-  # convos-releases (cwd); Github wraps all git/gh subprocess calls and
-  # centrally enforces dry-run.
+  # The weekly release-branch cut. Runs FROM a checkout of convos-releases
+  # (cwd); Github wraps all subprocess calls and enforces dry-run.
   #
-  # The pipeline is a chain of Success/Failure steps (Dry::Monads Do
-  # notation): `yield step(...)` short-circuits to the first Failure, so
-  # each step can assume everything before it succeeded. Declining to cut
-  # (wrong day/slot/skip-date) is Success(:skipped), not a Failure — it's
-  # an expected, non-error outcome. bin/train is the only place that maps
-  # the final Result to an exit code.
+  # The pipeline is a chain of `yield step(...)` (Dry::Monads Do) that
+  # short-circuits to the first Failure. Declining to cut (wrong
+  # day/slot/skip-date) is Success(:skipped), an expected non-error outcome.
   class Cut
     include Dry::Monads[:result, :do]
 
@@ -64,18 +60,12 @@ module Train
         mfile = File.join(mdir, "manifest.yml")
         sha = yield init_or_reconcile_manifest(mfile: mfile, mdir: mdir, version: version, today: today, sha: sha)
 
-        # Persist whatever statuses ensure_all_repos wrote to the manifest
-        # (e.g. one repo's "branched") UNCONDITIONALLY — even when the other
-        # repo's ensure failed — before yielding the result, so a hard
-        # failure on one repo doesn't lose the successful repo's committed
-        # status. `yield` below still short-circuits to the Failure after
-        # the commit/push has happened.
+        # Persist per-repo statuses unconditionally (even if one repo failed)
+        # before yielding, so a hard failure doesn't lose the other's status.
         result = ensure_all_repos(work: work, version: version, nxt: nxt, mfile: mfile, sha: sha)
-        # Advance the top-level manifest status past "cut" ONLY when every
-        # repo succeeded — reconcile_in_flight treats status:"cut" as
-        # in-flight, so leaving it at "cut" after a partial failure is
-        # correct (still in-flight); advancing it here, before
-        # persist_statuses, ensures the same commit publishes both.
+        # Advance top-level status past "cut" only when every repo succeeded —
+        # reconcile_in_flight treats "cut" as in-flight, so a partial failure
+        # correctly stays there. Set before persist_statuses so one commit publishes both.
         Manifest.set_status(mfile, "branched") if result.success?
         persist_statuses(mdir, version)
         yield result
@@ -136,16 +126,10 @@ module Train
       Success(first)
     end
 
-    # reconcile_in_flight: version arithmetic can't find the previous train
-    # (versions don't end in .0), so scan the durable state instead. A
-    # train cut TODAY and still status:cut is reconciled; one from an
-    # EARLIER date still status:cut means a bump PR never merged or a cut
-    # never finished — fail loud rather than silently cutting on top of it.
-    #
-    # Scans EVERY manifest rather than returning on the first same-day
-    # status:cut hit — glob order isn't cut-date order, so a stale
-    # (older-date) status:cut train appearing later in glob order must still
-    # be caught rather than silently skipped.
+    # Scans durable state for an unfinished train. Today's still-status:cut
+    # train is reconciled; an EARLIER-date one is a hard failure (a bump PR
+    # never merged, or a cut never finished). Scans every manifest — glob
+    # order isn't cut-date order, so a stale one appearing later must not slip through.
     def reconcile_in_flight(version, today)
       in_flight = nil
       Dir.glob(File.join(@releases_dir, "releases", "*", "manifest.yml")).sort.each do |mf|
@@ -174,9 +158,8 @@ module Train
       @out.puts "  convos-releases: releases/#{version}/{manifest.yml,ios.md,android.md,submission-notes.md}"
     end
 
-    # init_or_reconcile_manifest: once-per-version claim / reconcile mode.
-    # Returns the per-repo sha map to use for the rest of the pipeline
-    # (freshly captured on init, recorded-in-manifest on reconcile).
+    # Once-per-version claim / reconcile. Returns the per-repo sha map for the
+    # rest of the pipeline (freshly captured on init, recorded on reconcile).
     def init_or_reconcile_manifest(mfile:, mdir:, version:, today:, sha:)
       if File.exist?(mfile)
         @out.puts "Manifest exists — reconcile mode."
@@ -211,18 +194,10 @@ module Train
       File.write(File.join(mdir, "submission-notes.md"), submission)
     end
 
-    # previous_cut_date: the notes-seeding boundary for BOTH repos is the
-    # previous train's cut date, not a tag/commit lookup — tags don't exist
-    # until Phase-2 promotion ships, so deriving `since` from them would
-    # always fall back to seed-notes' 7-day window and a skipped week would
-    # silently lose changelog entries. Scans every manifest EXCEPT the one
-    # for the version currently being cut (it was just written by
-    # Manifest.init, moments before this runs, and would otherwise win as
-    # its own "most recent" prior manifest). Manifests with top-level
-    # status "abandoned" are excluded from consideration — an abandoned
-    # train's cut-date isn't a real boundary. Returns nil (seed-notes' own
-    # 7-day fallback applies) when no qualifying prior manifest exists —
-    # i.e. only for the first-ever cut.
+    # The notes-seeding boundary is the previous train's cut date (tags don't
+    # exist until promotion ships). Scans every manifest except the one being
+    # cut and any "abandoned" ones. Returns nil (seed-notes' 7-day fallback)
+    # only for the first-ever cut.
     def previous_cut_date(excluding:)
       dates = Dir.glob(File.join(@releases_dir, "releases", "*", "manifest.yml")).filter_map do |mf|
         next if File.dirname(mf) == File.join(@releases_dir, "releases", excluding)
@@ -235,12 +210,9 @@ module Train
       dates.max
     end
 
-    # ensure_all_repos: runs each repo's ensure steps independently and
-    # collects Success/Failure per repo, so a failure on one repo (e.g. a
-    # release-branch mismatch) doesn't hide the other repo's outcome — both
-    # ensures run before the combined Failure is returned. The caller (bin/
-    # train) prints the returned Failure message; this doesn't print here
-    # too.
+    # Runs each repo's ensure steps independently, collecting per-repo
+    # outcomes so one failure doesn't hide another's. bin/train prints the
+    # returned Failure; don't print it here too.
     def ensure_all_repos(work:, version:, nxt:, mfile:, sha:)
       outcomes = REPOS.to_h { |repo| [repo, ensure_repo(work: work, repo: repo, version: version, nxt: nxt, sha: sha[repo])] }
 
@@ -254,13 +226,9 @@ module Train
       Failure(failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
     end
 
-    # ensure_repo: the release-branch check is the only step that can fail
-    # this repo's ensure; bump-PR and release-PR steps are best-effort
-    # (warn, don't fail) so one repo's flaky auto-merge doesn't block the
-    # other repo's progress. Github::ApiError/CommandError raised inside
-    # either best-effort step must not propagate — that would abort
-    # ensure_all_repos entirely and skip the OTHER repo's ensure_repo call,
-    # contradicting the best-effort contract documented above.
+    # Only the release-branch check can fail this repo's ensure; bump-PR and
+    # release-PR are best-effort (warn, don't fail). Their API/command errors
+    # are rescued here so they can't abort the other repo's ensure.
     def ensure_repo(work:, repo:, version:, nxt:, sha:)
       dir = File.join(work, repo.split("/").last)
 
@@ -356,9 +324,8 @@ module Train
     end
 
     def seed_notes(repo, since)
-      # cut.rb never shells to `gh` itself for notes — Notes.format is the
-      # pure formatter; fetching PR JSON is a Github responsibility so it
-      # can be stubbed in tests. seed_notes here just wires them together.
+      # Notes.format is the pure formatter; fetching PR JSON is Github's job
+      # (stubbable in tests). This just wires them together.
       prs = @gh.merged_prs_since(repo, since.to_s.empty? ? Notes.default_since : since)
       Notes.format(prs)
     end

@@ -2,6 +2,10 @@
 
 require_relative "test_helper"
 require "train/github"
+# octokit up-front: release_exists? tests need the fake to raise REAL
+# Octokit exception classes (NotFound vs InternalServerError) so the
+# rescue hierarchy in Github#release_exists? is exercised for real.
+require "octokit"
 
 # FakeOctokitClient: a minimal Octokit::Client double. Real Octokit calls
 # return Sawyer::Resource objects (Hash-ish: [] with symbol keys, #dig);
@@ -18,6 +22,26 @@ class FakeOctokitClient
     @create_result = nil
     @graphql_result = { errors: nil }
     @graphql_results_queue = []
+    @releases_by_tag = {} # [repo, tag] => value | :not_found | :error
+    @permission_levels = {} # [repo, login] => "admin"/"write"/"read"/...
+    @merge_results = {} # [repo, number] => :ok | Octokit::Error subclass instance/class
+  end
+
+  # stub_release_for_tag: result may be a release-ish value (returned as
+  # is), :not_found (release_for_tag raises a real Octokit::NotFound, as
+  # the live API does for an absent release), or :error (raises a real
+  # Octokit::InternalServerError). Unstubbed lookups also raise NotFound —
+  # the GitHub API has no "nil" answer for this endpoint.
+  def stub_release_for_tag(repo:, tag:, result:)
+    @releases_by_tag[[repo, tag]] = result
+  end
+
+  def release_for_tag(repo, tag_name, _options = {})
+    result = @releases_by_tag.fetch([repo, tag_name], :not_found)
+    raise Octokit::NotFound if result == :not_found
+    raise Octokit::InternalServerError if result == :error
+
+    result
   end
 
   def stub_pull_requests(repo:, head: nil, state: "open", result:)
@@ -38,6 +62,28 @@ class FakeOctokitClient
 
   def stub_graphql_result(result)
     @graphql_result = result
+  end
+
+  def stub_permission_level(repo:, login:, permission:)
+    @permission_levels[[repo, login]] = permission
+  end
+
+  def permission_level(repo, collaborator, _options = {})
+    { permission: @permission_levels.fetch([repo, collaborator]) }
+  end
+
+  # stub_merge_pull_request_error: the next merge_pull_request(repo, number)
+  # call raises `error_class` instead of returning normally.
+  def stub_merge_pull_request_error(repo:, number:, error_class: Octokit::UnprocessableEntity)
+    @merge_results[[repo, number]] = error_class
+  end
+
+  def merge_pull_request(repo, number, _commit_message = "", options = {})
+    error_class = @merge_results[[repo, number]]
+    raise error_class if error_class
+
+    @last_merge = { repo: repo, number: number, options: options }
+    { merged: true }
   end
 
   # stub_graphql_results: queues distinct results for successive post()
@@ -67,6 +113,28 @@ class FakeOctokitClient
   def post(url, body)
     @posts << { url: url, body: body }
     @graphql_results_queue.empty? ? @graphql_result : @graphql_results_queue.shift
+  end
+
+  # stub_branch: result may be a branch-ish value, :not_found (raises real
+  # Octokit::NotFound, as the live API does for a deleted branch), or
+  # :error (raises Octokit::InternalServerError). Unstubbed lookups raise
+  # NotFound, mirroring the API.
+  def stub_branch(repo:, branch:, result:)
+    (@branches ||= {})[[repo, branch]] = result
+  end
+
+  def branch(repo, name, _options = {})
+    result = (@branches || {}).fetch([repo, name], :not_found)
+    raise Octokit::NotFound if result == :not_found
+    raise Octokit::InternalServerError if result == :error
+
+    result
+  end
+
+  attr_reader :last_create_ref
+
+  def create_ref(repo, ref, sha)
+    @last_create_ref = { repo: repo, ref: ref, sha: sha }
   end
 end
 
@@ -137,7 +205,7 @@ class GithubTest < Minitest::Test
 
     result = gh.pr_list(repo: "o/r", head: "bot/bump-1.2.0", state: "all")
 
-    assert_equal [{ "number" => 42, "url" => "https://github.com/o/r/pull/42" }], result
+    assert_equal [{ "number" => 42, "url" => "https://github.com/o/r/pull/42", "merged_at" => nil, "head-sha" => nil }], result
   end
 
   def test_pr_list_empty_when_no_match
@@ -175,6 +243,37 @@ class GithubTest < Minitest::Test
     result = gh.pr_create(repo: "o/r", base: "main", head: "feat", title: "t", body: "b")
 
     assert_nil result
+  end
+
+  # ---- release_exists?: NotFound → false, other errors → ApiError ----
+
+  def test_release_exists_false_when_absent
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    # unstubbed: the fake raises a REAL Octokit::NotFound, which must come
+    # back as plain `false` — NOT an ApiError (api! would have swallowed
+    # the NotFound into ApiError before the false-branch could see it).
+    refute gh.release_exists?("o/r", "v2.1.0")
+  end
+
+  def test_release_exists_true_when_present
+    client = FakeOctokitClient.new
+    client.stub_release_for_tag(repo: "o/r", tag: "v2.1.0", result: { id: 1, tag_name: "v2.1.0" })
+    gh = Train::Github.new(client: client)
+
+    assert gh.release_exists?("o/r", "v2.1.0")
+  end
+
+  def test_release_exists_wraps_non_404_errors_in_api_error
+    client = FakeOctokitClient.new
+    client.stub_release_for_tag(repo: "o/r", tag: "v2.1.0", result: :error)
+    gh = Train::Github.new(client: client)
+
+    error = assert_raises(Train::Github::ApiError) do
+      gh.release_exists?("o/r", "v2.1.0")
+    end
+    assert_match(/release_for_tag\(o\/r, v2\.1\.0\)/, error.message)
   end
 
   # ---- pr_merge_auto: resolves node_id then posts the GraphQL mutation ----
@@ -259,5 +358,218 @@ class GithubTest < Minitest::Test
     assert_equal 2, client.posts.size
     assert_includes client.posts[0][:body], "mergeMethod: SQUASH"
     assert_includes client.posts[1][:body], "mergeMethod: MERGE"
+  end
+
+  # ---- tag_sha: prefers the peeled (^{}) line for annotated tags ----
+
+  FakeOkStatus = Struct.new(:success?)
+  private_constant :FakeOkStatus
+
+  # stub_git_output: overrides Github#run (the private Open3.capture3 seam)
+  # on this instance to return canned (stdout, stderr, status) for the NEXT
+  # call, regardless of args — enough to test tag_sha's line-parsing logic
+  # without a real git subprocess or remote.
+  def stub_git_output(gh, stdout)
+    gh.define_singleton_method(:run) { |_args| [stdout, "", FakeOkStatus.new(true)] }
+  end
+
+  def test_tag_sha_prefers_peeled_sha_for_annotated_tags
+    gh = Train::Github.new
+    # ls-remote for an ANNOTATED tag returns two lines: the tag object's own
+    # sha, then a second "^{}" line with the commit sha it points at.
+    stub_git_output(gh, "tag-object-sha\trefs/tags/v2.1.0\ncommit-sha-abc\trefs/tags/v2.1.0^{}\n")
+
+    assert_equal "commit-sha-abc", gh.tag_sha("/tmp/dir", "v2.1.0")
+  end
+
+  def test_tag_sha_falls_back_to_plain_sha_for_lightweight_tags
+    gh = Train::Github.new
+    # A LIGHTWEIGHT tag has no object of its own — ls-remote returns just
+    # one line, already the commit sha, no ^{} line.
+    stub_git_output(gh, "commit-sha-xyz\trefs/tags/v2.1.0\n")
+
+    assert_equal "commit-sha-xyz", gh.tag_sha("/tmp/dir", "v2.1.0")
+  end
+
+  def test_tag_sha_empty_when_tag_absent
+    gh = Train::Github.new
+    stub_git_output(gh, "")
+
+    assert_equal "", gh.tag_sha("/tmp/dir", "v9.9.9")
+  end
+
+  # ---- collaborator_permission ----
+
+  def test_collaborator_permission_returns_the_permission_string
+    client = FakeOctokitClient.new
+    client.stub_permission_level(repo: "o/r", login: "octocat", permission: "write")
+    gh = Train::Github.new(client: client)
+
+    assert_equal "write", gh.collaborator_permission("o/r", "octocat")
+  end
+
+  # ---- pr_list: merged_at + head-sha are surfaced for Merge/Promote ----
+
+  def test_pr_list_surfaces_merged_at_and_head_sha
+    client = FakeOctokitClient.new
+    client.stub_pull_requests(
+      repo: "o/r", head: "o:release/1.0.0", state: "all",
+      result: [{ number: 5, html_url: "x", merged_at: "2026-07-15T00:00:00Z", head: { sha: "tip-abc" } }]
+    )
+    gh = Train::Github.new(client: client)
+
+    result = gh.pr_list(repo: "o/r", head: "release/1.0.0", state: "all")
+
+    assert_equal "2026-07-15T00:00:00Z", result.first["merged_at"]
+    assert_equal "tip-abc", result.first["head-sha"]
+  end
+
+  # ---- ancestor?: merge-base exit-code mapping ----
+
+  # stub_git_status: like stub_git_output but with a controllable exit
+  # status — ancestor?'s whole subtlety is the exit-code mapping (0 = yes;
+  # 1 = no; >1 = error e.g. unknown rev, also treated as "not confirmed").
+  def stub_git_status(gh, ok)
+    gh.define_singleton_method(:run) { |_args| ["", "", FakeOkStatus.new(ok)] }
+  end
+
+  def test_ancestor_true_on_exit_zero
+    gh = Train::Github.new
+    stub_git_status(gh, true)
+
+    assert gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
+  end
+
+  def test_ancestor_false_on_any_nonzero_exit
+    gh = Train::Github.new
+    stub_git_status(gh, false)
+
+    refute gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
+  end
+
+  # ---- branch_exists?: rescue ordering (same bug class as release_exists?) ----
+
+  def test_branch_exists_false_when_absent
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    refute gh.branch_exists?("o/r", "hotfix/1.0.1")
+  end
+
+  def test_branch_exists_true_when_present
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "hotfix/1.0.1", result: { name: "hotfix/1.0.1" })
+    gh = Train::Github.new(client: client)
+
+    assert gh.branch_exists?("o/r", "hotfix/1.0.1")
+  end
+
+  def test_branch_exists_wraps_non_404_errors_in_api_error
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "hotfix/1.0.1", result: :error)
+    gh = Train::Github.new(client: client)
+
+    assert_raises(Train::Github::ApiError) { gh.branch_exists?("o/r", "hotfix/1.0.1") }
+  end
+
+  # ---- create_ref ----
+
+  def test_create_ref_posts_heads_ref
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
+
+    assert_equal({ repo: "o/r", ref: "heads/hotfix/1.0.1", sha: "tip-abc" }, client.last_create_ref)
+  end
+
+  def test_create_ref_gated_under_dry_run
+    gh = Train::Github.new(dry_run: true, out: @out)
+
+    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
+
+    assert_match(/\[dry-run\] create_ref/, @out.string)
+  end
+
+  # ---- with_releases_clone: tmpdir lifecycle around the block ----
+
+  # stub_clone_noop: overrides Github#clone on this instance so the real
+  # with_releases_clone can run without network — the tmpdir handling is
+  # what's under test.
+  def stub_clone_noop(gh)
+    gh.define_singleton_method(:clone) { |_url, dest, **| dest }
+  end
+
+  def test_with_releases_clone_yields_dir_returns_block_value_and_cleans_up
+    gh = Train::Github.new
+    stub_clone_noop(gh)
+    seen = nil
+
+    result = gh.with_releases_clone("test-clone-") do |dir|
+      seen = dir
+      assert Dir.exist?(dir)
+      :block_value
+    end
+
+    assert_equal :block_value, result
+    refute Dir.exist?(seen), "tmpdir must be removed after the block"
+  end
+
+  def test_with_releases_clone_cleans_up_when_the_block_raises
+    gh = Train::Github.new
+    stub_clone_noop(gh)
+    seen = nil
+
+    assert_raises(RuntimeError) do
+      gh.with_releases_clone("test-clone-") do |dir|
+        seen = dir
+        raise "boom"
+      end
+    end
+
+    refute Dir.exist?(seen), "tmpdir must be removed even when the block raises"
+  end
+
+  # ---- pr_merge ----
+
+  def test_pr_merge_calls_octokit_with_merge_method
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    result = gh.pr_merge("o/r", 5, merge_method: "merge")
+
+    assert_equal true, result
+    assert_equal({ repo: "o/r", number: 5, options: { merge_method: "merge" } }, client.instance_variable_get(:@last_merge))
+  end
+
+  def test_pr_merge_pins_expected_head_sha_as_the_api_sha_guard
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    gh.pr_merge("o/r", 5, merge_method: "merge", expected_head_sha: "tip-abc")
+
+    assert_equal(
+      { repo: "o/r", number: 5, options: { merge_method: "merge", sha: "tip-abc" } },
+      client.instance_variable_get(:@last_merge)
+    )
+  end
+
+  def test_pr_merge_wraps_octokit_errors_in_api_error
+    client = FakeOctokitClient.new
+    client.stub_merge_pull_request_error(repo: "o/r", number: 5, error_class: Octokit::UnprocessableEntity)
+    gh = Train::Github.new(client: client)
+
+    assert_raises(Train::Github::ApiError) { gh.pr_merge("o/r", 5, merge_method: "merge") }
+  end
+
+  def test_pr_merge_dry_run_does_not_call_octokit
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(dry_run: true, client: client, out: @out)
+
+    result = gh.pr_merge("o/r", 5, merge_method: "merge")
+
+    assert_equal true, result
+    assert_nil client.instance_variable_get(:@last_merge)
+    assert_match(/\[dry-run\] merge o\/r#5/, @out.string)
   end
 end
