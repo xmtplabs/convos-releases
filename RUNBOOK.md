@@ -43,7 +43,8 @@ store steps — App Store Connect / Play Console access.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
    `releases/x.y.z/*.md`. Write markdown — the GitHub Release renders
    it, and promotion renders plain text for the stores (headers →
-   `Header:`, bullets → `•`, links → their text). Play caps android
+   `Header:`, bullets → `•`, links → their text; reviewer submission
+   notes keep URLs as `text (url)`). Play caps android
    notes at 500 rendered chars; promotion fails with the count if over.
 4. **Go/no-go: comment `@convos-conductor merge`** on either repo's release
    PR — it merges BOTH repos' PRs (see "Merging the train").

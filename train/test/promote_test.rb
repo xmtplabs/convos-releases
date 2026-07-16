@@ -92,9 +92,9 @@ class PromoteTest < Minitest::Test
     # fixture ios.md is "## Features\n- ios note\n"
     assert_equal "Features:\n• ios note", File.read(File.join(notes_dir, "ios.store.txt"))
     assert File.exist?(File.join(notes_dir, "android.store.txt"))
-    # reviewer notes stay raw — rendering would strip URLs reviewers need
-    refute File.exist?(File.join(notes_dir, "submission.store.txt"))
-    assert File.exist?(File.join(notes_dir, "submission-notes.md"))
+    # reviewer notes render in URL-preserving mode
+    submission = File.read(File.join(notes_dir, "submission.store.txt"), encoding: Encoding::UTF_8)
+    assert_includes submission, "env (https://test.example)"
   end
 
   def test_prepare_fails_before_tag_when_platform_notes_are_missing
@@ -683,6 +683,6 @@ class PromoteTest < Minitest::Test
     Train::Manifest.write(mfile, data)
     File.write(File.join(mdir, "ios.md"), "## Features\n- ios note\n")
     File.write(File.join(mdir, "android.md"), "## Features\n- android note\n")
-    File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
+    File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n\n[env](https://test.example)\n")
   end
 end

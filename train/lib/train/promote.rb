@@ -327,14 +327,13 @@ module Train
     end
 
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
-    # The .md files feed the GitHub Release (rendered markdown); the store
-    # listings take plain text only, so the platform files get a rendered
-    # twin. submission-notes.md deliberately does NOT — reviewer notes are a
-    # human-read form field, and rendering would strip the URLs (test
-    # environments, demo videos) reviewers need.
+    # The .md files feed the GitHub Release (rendered markdown); every staged
+    # file gets a plain-text twin for the stores. Listings drop link URLs;
+    # reviewer notes keep them as "text (url)" — App Review needs them.
     STORE_RENDERS = {
-      "ios.md" => "ios.store.txt",
-      "android.md" => "android.store.txt"
+      "ios.md" => ["ios.store.txt", :listing],
+      "android.md" => ["android.store.txt", :listing],
+      "submission-notes.md" => ["submission.store.txt", :reviewer]
     }.freeze
 
     # notes_dir is recreated from scratch — a leftover .train-promote from an
@@ -348,9 +347,10 @@ module Train
         next unless File.exist?(src)
 
         FileUtils.cp(src, File.join(notes_dir, name))
-        next unless STORE_RENDERS[name]
-
-        File.write(File.join(notes_dir, STORE_RENDERS[name]), StoreNotes.render(File.read(src, encoding: Encoding::UTF_8)))
+        twin, mode = STORE_RENDERS.fetch(name)
+        text = File.read(src, encoding: Encoding::UTF_8)
+        rendered = mode == :reviewer ? StoreNotes.render_reviewer(text) : StoreNotes.render(text)
+        File.write(File.join(notes_dir, twin), rendered)
       end
       @gh.rev_parse(clone_dir)
     end

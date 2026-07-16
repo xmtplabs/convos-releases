@@ -48,17 +48,35 @@ module Train
       end
     end
 
+    # Reviewer notes keep their URLs — App Review needs the test-environment
+    # links a listing would drop.
+    class ReviewerText < StoreText
+      def link(link, _title, content)
+        "#{content} (#{link})"
+      end
+    end
+
     module_function
+
+    # Store-listing text: links reduce to their text.
+    def render(markdown)
+      render_with(StoreText.new, markdown)
+    end
+
+    # Reviewer-notes text: same typography, URLs preserved as "text (url)".
+    def render_reviewer(markdown)
+      render_with(ReviewerText.new, markdown)
+    end
 
     # Output is always UTF-8 (the bullets are), independent of the process
     # locale a caller read the markdown under; invalid bytes are scrubbed
     # rather than exploding inside the C extension.
-    def render(markdown)
+    def render_with(renderer, markdown)
       text = markdown.to_s
       text = text.dup.force_encoding(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
       text = text.scrub("?") unless text.valid_encoding?
 
-      Redcarpet::Markdown.new(StoreText.new, strikethrough: true, tables: true)
+      Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true)
                          .render(text)
                          .gsub(/\n{3,}/, "\n\n")
                          .strip

@@ -30,6 +30,16 @@ class StoreNotesTest < Minitest::Test
     assert_equal "See the changelog for details", render("See [the changelog](https://example.com/log) for details")
   end
 
+  def test_reviewer_rendering_keeps_urls
+    out = Train::StoreNotes.render_reviewer("Login at [staging](https://test.convos.org), creds in 1Password")
+    assert_equal "Login at staging (https://test.convos.org), creds in 1Password", out
+  end
+
+  def test_reviewer_rendering_shares_the_listing_typography
+    out = Train::StoreNotes.render_reviewer("## Test accounts\n- **user**: qa@convos.org\n")
+    assert_equal "Test accounts:\n• user: qa@convos.org", out
+  end
+
   def test_emphasis_and_code_are_stripped
     assert_equal "really fast sync", render("**really** *fast* `sync`")
   end
