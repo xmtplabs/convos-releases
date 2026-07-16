@@ -11,7 +11,9 @@ module Train
   module Versions
     class Error < StandardError; end
 
-    VERSION_RE = /\A[0-9]+\.[0-9]+\.[0-9]+\z/
+    # No leading zeros — semver forbids them and the semantic gem rejects
+    # them, so valid? and parse! must agree.
+    VERSION_RE = /\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/
 
     module_function
 
@@ -19,11 +21,16 @@ module Train
       version.to_s.match?(VERSION_RE)
     end
 
-    # parse!: Semantic::Version for a strict train version; Error otherwise.
+    # parse!: Semantic::Version for a strict train version; Error otherwise
+    # (including anything the gem itself rejects — never a raw ArgumentError).
     def parse!(version)
       raise Error, "bad version '#{version}'" unless valid?(version)
 
-      Semantic::Version.new(version.to_s)
+      begin
+        Semantic::Version.new(version.to_s)
+      rescue ArgumentError
+        raise Error, "bad version '#{version}'"
+      end
     end
 
     def next_minor(version)

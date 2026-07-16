@@ -113,6 +113,14 @@ class VersionsTest < Minitest::Test
     assert_raises(Train::Versions::Error) { Train::Versions.next_patch("2.1.0+build5") }
   end
 
+  def test_leading_zeros_are_invalid_and_never_leak_argument_error
+    refute Train::Versions.valid?("02.1.0")
+    # Versions::Error, not the semantic gem's raw ArgumentError.
+    assert_raises(Train::Versions::Error) { Train::Versions.next_minor("02.1.0") }
+    # plain zero components stay fine
+    assert_equal "0.2.0", Train::Versions.next_minor("0.1.3")
+  end
+
   def test_tag_round_trip
     assert_equal "v2.1.0", Train::Versions.tag("2.1.0")
     assert_equal "2.1.0", Train::Versions.from_tag("v2.1.0")
