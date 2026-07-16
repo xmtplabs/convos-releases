@@ -92,7 +92,32 @@ class PromoteTest < Minitest::Test
     # fixture ios.md is "## Features\n- ios note\n"
     assert_equal "Features:\n• ios note", File.read(File.join(notes_dir, "ios.store.txt"))
     assert File.exist?(File.join(notes_dir, "android.store.txt"))
-    assert File.exist?(File.join(notes_dir, "submission.store.txt"))
+    # reviewer notes stay raw — rendering would strip URLs reviewers need
+    refute File.exist?(File.join(notes_dir, "submission.store.txt"))
+    assert File.exist?(File.join(notes_dir, "submission-notes.md"))
+  end
+
+  def test_prepare_fails_before_tag_when_platform_notes_are_missing
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { REPO => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+      # no ios.md, no submission-notes.md
+    end
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/missing ios\.md, submission-notes\.md/, result.failure)
+    refute @gh.called?(:push), "missing notes must stop promotion before the tag is pushed"
   end
 
   def test_prepare_fails_when_android_notes_render_over_the_play_limit

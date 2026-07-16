@@ -113,8 +113,8 @@ platform :ios do
     # fail a finished staging over a long changelog.
     notes_text = File.read(ios_notes_path, encoding: Encoding::UTF_8)[0, 4000]
 
-    review_notes_path = File.join(notes_dir, "submission.store.txt")
-    UI.user_error!("rendered submission notes missing (run train promote prepare first): #{review_notes_path}") unless File.readable?(review_notes_path)
+    review_notes_path = File.join(notes_dir, "submission-notes.md")
+    UI.user_error!("submission notes missing (run train promote prepare first): #{review_notes_path}") unless File.readable?(review_notes_path)
     review_notes_text = File.read(review_notes_path, encoding: Encoding::UTF_8)
 
     deliver(

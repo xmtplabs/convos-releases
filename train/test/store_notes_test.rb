@@ -46,4 +46,36 @@ class StoreNotesTest < Minitest::Test
     assert_equal "", render("")
     assert_equal "", render(nil)
   end
+
+  # GitHub renders these fine, the stores must not see the markup.
+
+  def test_inline_html_tags_are_stripped_keeping_text
+    assert_equal "Tap Enter to send bold messages", render("Tap <kbd>Enter</kbd> to send <b>bold</b> messages")
+  end
+
+  def test_block_html_is_stripped_keeping_text
+    assert_equal "centered note", render("<div>\ncentered note\n</div>")
+  end
+
+  def test_strikethrough_is_stripped
+    assert_equal "removed feature", render("~~removed~~ feature")
+  end
+
+  def test_entities_decode
+    assert_equal "Fish & chips < more", render("Fish &amp; chips &lt; more")
+  end
+
+  def test_tables_render_without_pipes
+    md = "| Col A | Col B |\n|---|---|\n| one | two |\n"
+    out = render(md)
+    refute_includes out, "|"
+    assert_includes out, "one"
+  end
+
+  def test_invalid_bytes_are_scrubbed_not_raised
+    bad = "ok \xFF text".dup.force_encoding(Encoding::ASCII_8BIT)
+    out = Train::StoreNotes.render(bad)
+    assert_includes out, "ok"
+    assert_includes out, "text"
+  end
 end

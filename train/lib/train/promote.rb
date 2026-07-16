@@ -44,6 +44,7 @@ module Train
         # mutated yet, not after the tag is already claimed.
         notes_dir = File.join(app_dir, ".train-promote")
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
+        yield assert_notes_present(repo: repo, version: version, notes_dir: notes_dir)
         yield assert_notes_edited(repo: repo, version: version, notes_dir: notes_dir)
         yield assert_notes_fit(repo: repo, version: version, notes_dir: notes_dir)
 
@@ -326,12 +327,14 @@ module Train
     end
 
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
-    # The .md files feed the GitHub Release (rendered markdown); the stores
-    # take plain text only, so each staged file gets a store-rendered twin.
+    # The .md files feed the GitHub Release (rendered markdown); the store
+    # listings take plain text only, so the platform files get a rendered
+    # twin. submission-notes.md deliberately does NOT — reviewer notes are a
+    # human-read form field, and rendering would strip the URLs (test
+    # environments, demo videos) reviewers need.
     STORE_RENDERS = {
       "ios.md" => "ios.store.txt",
-      "android.md" => "android.store.txt",
-      "submission-notes.md" => "submission.store.txt"
+      "android.md" => "android.store.txt"
     }.freeze
 
     # notes_dir is recreated from scratch — a leftover .train-promote from an
@@ -345,9 +348,26 @@ module Train
         next unless File.exist?(src)
 
         FileUtils.cp(src, File.join(notes_dir, name))
+        next unless STORE_RENDERS[name]
+
         File.write(File.join(notes_dir, STORE_RENDERS[name]), StoreNotes.render(File.read(src, encoding: Encoding::UTF_8)))
       end
       @gh.rev_parse(clone_dir)
+    end
+
+    # The staging contract the lanes rely on: the promoting platform's notes
+    # must exist (iOS also needs reviewer notes) — fail before the tag push,
+    # not in the lane afterwards.
+    def assert_notes_present(repo:, version:, notes_dir:)
+      platform = platform_for(repo)
+      return Success(:ok) unless platform
+
+      required = [platform.notes_file]
+      required << "submission-notes.md" if repo.end_with?("convos-ios")
+      missing = required.reject { |name| File.exist?(File.join(notes_dir, name)) }
+      return Success(:ok) if missing.empty?
+
+      Failure("releases/#{version}/ is missing #{missing.join(", ")} — seed/restore the notes, then re-run promotion")
     end
 
     def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:)

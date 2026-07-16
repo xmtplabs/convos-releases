@@ -309,6 +309,7 @@ the manifest, not the calendar.
 | Merge: `no RC recorded for tip <sha>` | the tip's RC upload is still running or failed | Wait for / re-run the RC upload, then comment the merge command again. |
 | Merge: `<user> lacks write on <repo>` | commenter lacks push access on one participating repo | Someone with write on BOTH repos comments instead. |
 | Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
+| Promotion: `android release notes render to N chars (Play limit 500)` | android.md too long once rendered | Nothing was tagged or staged — the gate runs before any mutation. Pencil-edit `releases/x.y.z/android.md` on main to shorten (check the rendered length: `train` renders headers/bullets/links to plain text), then convos-client → Actions → "Promote Release" → Run workflow with the version. iOS promotion is independent and unaffected. |
 | Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |
 | Promotion run failed midway / never fired | transient error, or the caller workflows landed after the merge | Re-run the failed run, or Actions → "Promote Release" → dispatch with the version — everything converges. |
 | Promote queued run disappeared | a third run entered the shared store concurrency group (GitHub cancels the pending slot) | Dispatch "Promote Release" with the version. (not yet observed) |
