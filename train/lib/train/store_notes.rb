@@ -26,6 +26,11 @@ module Train
         "• #{text.strip}\n"
       end
 
+      # Blank line after each list so sections stay visually separated.
+      def list(content, _list_type)
+        "#{content}\n"
+      end
+
       def link(_link, _title, content)
         content
       end
