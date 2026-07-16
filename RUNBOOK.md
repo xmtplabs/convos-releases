@@ -41,7 +41,10 @@ store steps — App Store Connect / Play Console access.
 2. **Every push to `release/x.y.z`** uploads an RC (TestFlight / Play
    internal) and records its artifact identity in the manifest.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
-   `releases/x.y.z/*.md`.
+   `releases/x.y.z/*.md`. Write markdown — the GitHub Release renders
+   it, and promotion renders plain text for the stores (headers →
+   `Header:`, bullets → `•`, links → their text). Play caps android
+   notes at 500 rendered chars; promotion fails with the count if over.
 4. **Go/no-go: comment `@convos-conductor merge`** on either repo's release
    PR — it merges BOTH repos' PRs (see "Merging the train").
 5. **Promotion runs automatically on the merge**: tags `vx.y.z`, stages the
@@ -213,10 +216,11 @@ GH_TOKEN=$(gh auth token) nix develop --command train promote prepare \
 
 - **Play**: Play Console → org.convos.android → Internal testing →
   promote the recorded versionCode to Production as a DRAFT → paste
-  `releases/x.y.z/android.md` (≤500 chars).
+  `.train-promote/android.store.txt` (the ≤500-char rendering prepare
+  staged).
 - **App Store**: App Store Connect → new App Store version x.y.z → attach
-  the recorded TestFlight build number → paste `releases/x.y.z/ios.md` +
-  reviewer notes from `submission-notes.md`.
+  the recorded TestFlight build number → paste `.train-promote/ios.store.txt`
+  + reviewer notes from `.train-promote/submission.store.txt`.
 - Record it (run where prepare ran — the GitHub Release body reads the
   notes prepare staged; also opens the hotfix back-merge PR when the
   manifest is hotfix-kind):
