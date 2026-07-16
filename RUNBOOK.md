@@ -17,6 +17,20 @@ Your account needs: push access to convos-ios/convos-client, org-admin (or
 equivalent bypass) for direct pushes to convos-releases `main`, and — for
 store steps — App Store Connect / Play Console access.
 
+**Contents**
+
+- [The normal week (no action required)](#the-normal-week-no-action-required)
+- [Merging the train](#merging-the-train)
+- [Promotion (automatic; how to re-run)](#promotion-automatic-how-to-re-run)
+- [Hotfix: patching an already-released version](#hotfix-patching-an-already-released-version)
+- [Manual cut (CI broken or off-schedule)](#manual-cut-ci-broken-or-off-schedule)
+- [Fully manual cut (train CLI itself unusable)](#fully-manual-cut-train-cli-itself-unusable)
+- [Manual RC upload (uploader workflows broken)](#manual-rc-upload-uploader-workflows-broken)
+- [Manual store submission (promotion broken)](#manual-store-submission-promotion-broken)
+- [Abandoning a train](#abandoning-a-train)
+- [Skipping a week / changing the cut day](#skipping-a-week--changing-the-cut-day)
+- [Troubleshooting](#troubleshooting-all-observed-live-unless-noted)
+
 ## The normal week (no action required)
 
 1. **Thursday 15:45 ET** — the `release-cut` workflow cuts `release/x.y.z`
@@ -249,17 +263,37 @@ Keep vs revert:
 
 ## Skipping a week / changing the cut day
 
-Edit `release-config.yml` on main (web pencil is fine):
+Config lives in `release-config.yml` on main (web pencil is fine):
 
 ```yaml
 cut-day: thursday
 skip-dates: ["2026-11-26"]   # ISO dates to skip
 ```
 
-Manual off-schedule cut: `train cut --force` (see above). To cut early in
-place of the scheduled one, cut with `--force`, then add that week's
-cut-day date to `skip-dates` (a train in `status: branched` doesn't block
-the next cut — without the skip entry you'd cut TWO trains that week).
+**Skip a week entirely** (holiday, freeze): add that week's cut-day date
+to `skip-dates` BEFORE Thursday 15:45 ET. Nothing else — the scheduled
+run sees the skip and exits.
+
+**Move the cut EARLIER that week** (e.g. Wednesday, because Thursday is
+a holiday):
+
+1. On the day you want it, dispatch Actions → "Release Cut" → Run
+   workflow with `force: true` (or locally `train cut --force`).
+2. THEN add the skipped Thursday's date to `skip-dates`. Without it the
+   scheduled run cuts a SECOND train that week (a `status: branched`
+   train doesn't block the next cut).
+
+**Move the cut LATER that week** (e.g. Friday): same two steps, opposite
+order — add Thursday's date to `skip-dates` FIRST (before 15:45 ET), then
+force-dispatch on Friday. Whichever day the schedule could still fire on
+must be skipped before it arrives.
+
+**Change the day permanently**: edit `cut-day`. The two cron slots in
+`release-cut.yml` fire daily — the config decides which day acts — so no
+workflow edit is needed.
+
+Everything downstream is day-agnostic: RCs, merge, and promotion key off
+the manifest, not the calendar.
 
 ## Troubleshooting (all observed live unless noted)
 
