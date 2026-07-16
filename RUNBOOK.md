@@ -101,6 +101,18 @@ source shas must match; a hotfix branch is verified by ancestry). A
 `hotfix/…` branch auto-deleted on merge is restored automatically for the
 back-merge.
 
+Sharp edges:
+- **A single-platform hotfix claims the version for both platforms.** If
+  the OTHER platform later needs a fix from the same base tag, its
+  dispatch fails reconciliation ("source-sha mismatch" — it isn't in the
+  manifest). Recovery: pencil-edit the manifest on main, adding that
+  repo's entry (`source-sha:` = `git rev-parse vx.y.z^{commit}` there,
+  `release-branch: hotfix/x.y.(z+1)`, `status: pending`, `rc: []`) plus
+  its notes file, then re-dispatch — reconcile completes the branch/PR.
+- **The latest-tag guard is per repo.** After an iOS-only v2.1.1, a
+  both-platform hotfix from v2.1.1 fails Android's guard (its latest is
+  still v2.1.0). Hotfix per platform, or wait for the next train.
+
 ## Manual cut (CI broken or off-schedule)
 
 Same code path CI runs:
@@ -170,21 +182,37 @@ GH_TOKEN=$(gh auth token) nix develop --command train append-rc \
 ## Manual store submission (promotion broken)
 
 Normally promotion stages all of this — use these steps only when it's
-down. Use ONLY manifest-recorded artifacts (`train status x.y.z`):
+down. Use ONLY manifest-recorded artifacts (`train status x.y.z`), and
+only for repos PRESENT in the manifest — a single-platform hotfix must
+never tag or record the unaffected repo.
+
+Per manifest-listed repo, from that repo's checkout on main:
+
+```sh
+# validates the RC + trees, tags vx.y.z, stages notes into .train-promote/:
+GH_TOKEN=$(gh auth token) nix develop --command train promote prepare \
+  --repo xmtplabs/<repo> --version x.y.z \
+  --merge-sha <release PR merge commit> --head-sha <release branch tip>
+```
 
 - **Play**: Play Console → org.convos.android → Internal testing →
   promote the recorded versionCode to Production as a DRAFT → paste
-  `releases/x.y.z/android.md` (≤500 chars) → human presses
-  "Start rollout".
+  `releases/x.y.z/android.md` (≤500 chars).
 - **App Store**: App Store Connect → new App Store version x.y.z → attach
   the recorded TestFlight build number → paste `releases/x.y.z/ios.md` +
-  reviewer notes from `submission-notes.md` → human presses
-  "Submit for Review".
-- Tag both repos: `git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
-- Record it: `train promote record --repo <repo> --version x.y.z
-  --tag vx.y.z --key <version-code|build-number> --value <artifact id>
-  --notes-sha <convos-releases main sha> --run manual` (also opens the
-  hotfix back-merge PR when the manifest is hotfix-kind).
+  reviewer notes from `submission-notes.md`.
+- Record it (run where prepare ran — the GitHub Release body reads the
+  notes prepare staged; also opens the hotfix back-merge PR when the
+  manifest is hotfix-kind):
+
+```sh
+GH_TOKEN=$(gh auth token) nix develop --command train promote record \
+  --repo xmtplabs/<repo> --version x.y.z --tag vx.y.z \
+  --key <version-code|build-number> --value <artifact id> \
+  --notes-sha <convos-releases main sha> --run manual
+```
+
+- Human presses "Start rollout" / "Submit for Review".
 
 ## Abandoning a train
 
