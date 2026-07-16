@@ -64,6 +64,24 @@ module Train
       :appended
     end
 
+    # add_repo: extends an existing manifest with a repo cut later than the
+    # others (a hotfix reaching its second platform). Top-level status
+    # returns to "branched" — the train has an in-flight repo again.
+    def add_repo(file, repo:, sha:, branch:)
+      data = read(file)
+      raise Error, "#{file}: #{repo} already in manifest" if data.fetch("repos").key?(repo)
+
+      data["repos"][repo] = {
+        "source-sha" => sha,
+        "release-branch" => branch,
+        "status" => "pending",
+        "rc" => []
+      }
+      data["status"] = "branched"
+      write(file, data)
+      data
+    end
+
     def set_repo_status(file, repo:, status:)
       data = read(file)
       data.fetch("repos").fetch(repo) do

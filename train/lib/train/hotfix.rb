@@ -36,6 +36,7 @@ module Train
     # run: Success(:dry_run | :hotfixed) or Failure(message).
     def run(base_tag:, only_repo: nil)
       yield guard_ref
+      yield guard_synced_checkout
       unless base_tag.match?(BASE_TAG_RE)
         return Failure("--base-tag must look like vX.Y.Z, got '#{base_tag}'")
       end
@@ -64,7 +65,7 @@ module Train
         sha = captures.transform_values { |c| c[:sha] }
 
         if File.exist?(mfile)
-          sha = yield reconcile_manifest(mfile: mfile, version: version, repos: repos, sha: sha)
+          sha = yield reconcile_manifest(mfile: mfile, mdir: mdir, version: version, repos: repos, sha: sha, base_tag: base_tag)
         else
           yield init_manifest(mfile: mfile, mdir: mdir, version: version, today: today, repos: repos, sha: sha, base_tag: base_tag)
         end
@@ -88,6 +89,21 @@ module Train
       return Success(:ok) unless ref && ref != "main"
 
       Failure("release-cut must run from main (got #{ref})")
+    end
+
+    # The checkout must be AT origin/main: a locally-committed manifest
+    # whose push failed would otherwise survive into a retry, where
+    # reconcile reads it as already-recorded and skips the push — breaking
+    # manifest-first. A stale (behind) checkout is refused for the same
+    # reason: decisions would be made against old ledger state.
+    def guard_synced_checkout
+      remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
+      return Success(:ok) if remote.empty?
+
+      local = @gh.rev_parse(@releases_dir, "HEAD")
+      return Success(:ok) if local == remote
+
+      Failure("convos-releases checkout is not at origin/main (local #{local}, origin #{remote}) — reset/pull, then retry")
     end
 
     def participating_repos(only_repo)
@@ -141,27 +157,57 @@ module Train
       files
     end
 
-    # A manifest already exists: safe to proceed only if it's a rerun, not a
-    # collision. Requires kind "hotfix" and every recorded source-sha to match
-    # what was just captured (a mismatch means base_tag moved). Returns the
-    # RECORDED shas — the authoritative value already-created branches are
-    # keyed on.
-    def reconcile_manifest(mfile:, version:, repos:, sha:)
+    # A manifest already exists: a rerun reconciles; a repo the manifest
+    # doesn't know EXTENDS the train (a hotfix reaching its second platform
+    # — both share the base tag, so both land on the same version). Only
+    # kind "hotfix" qualifies, and repos already recorded must
+    # source-sha-match what the tag resolves to now (a mismatch means
+    # base_tag moved). Returns the authoritative shas: recorded for
+    # existing repos, freshly captured for extended ones.
+    def reconcile_manifest(mfile:, mdir:, version:, repos:, sha:, base_tag:)
       data = Manifest.read(mfile)
 
       unless data["kind"] == "hotfix"
         return Failure("manifest already exists for #{version} with kind #{data["kind"].inspect} (releases/#{version}/manifest.yml) — expected kind \"hotfix\"")
       end
 
-      recorded = repos.to_h { |repo| [repo, data.dig("repos", repo, "source-sha")] }
-      mismatched = repos.select { |repo| recorded[repo] != sha[repo] }
+      # Partition on key presence, not source-sha truthiness — an entry
+      # missing its source-sha (bad hand edit) must fail the mismatch check
+      # below, not crash add_repo on an already-present key.
+      existing, missing = repos.partition { |repo| data.fetch("repos", {}).key?(repo) }
+      mismatched = existing.select { |repo| data.dig("repos", repo, "source-sha") != sha[repo] }
       unless mismatched.empty?
-        details = mismatched.map { |repo| "#{repo}: manifest has #{recorded[repo].inspect}, tag now resolves to #{sha[repo].inspect}" }.join("; ")
+        details = mismatched.map { |repo| "#{repo}: manifest has #{data.dig("repos", repo, "source-sha").inspect}, tag now resolves to #{sha[repo].inspect}" }.join("; ")
         return Failure("hotfix #{version} manifest source-sha mismatch (base_tag moved?) — #{details}")
       end
 
-      @out.puts "Manifest exists — reconcile mode."
-      Success(recorded)
+      if missing.any?
+        yield extend_manifest(mfile: mfile, mdir: mdir, version: version, repos: missing, sha: sha, base_tag: base_tag)
+        @out.puts "Manifest exists — extended to #{missing.join(", ")}."
+      else
+        @out.puts "Manifest exists — reconcile mode."
+      end
+
+      Success(existing.to_h { |repo| [repo, data.dig("repos", repo, "source-sha")] }
+                      .merge(missing.to_h { |repo| [repo, sha[repo]] }))
+    end
+
+    # extend_manifest: records the new repo(s) and seeds their notes, pushed
+    # like the initial manifest commit — manifest first, app repos second.
+    def extend_manifest(mfile:, mdir:, version:, repos:, sha:, base_tag:)
+      repos.each do |repo|
+        Manifest.add_repo(mfile, repo: repo, sha: sha[repo], branch: "hotfix/#{version}")
+      end
+      write_seed_notes(mdir: mdir, repos: repos, base_tag: base_tag)
+
+      @gh.git_config_bot(@releases_dir)
+      @gh.add(@releases_dir, mdir)
+      @gh.commit(@releases_dir, "train: extend hotfix #{version} to #{repos.join(", ")}")
+      unless @gh.push(@releases_dir, "HEAD:main")
+        return Failure("manifest push to convos-releases main failed (non-fast-forward? retry the hotfix)")
+      end
+
+      Success(:ok)
     end
 
     def init_manifest(mfile:, mdir:, version:, today:, repos:, sha:, base_tag:)
@@ -183,18 +229,22 @@ module Train
     # like Cut — the hotfix branch is just the base tag plus a bump commit, so
     # dev PRs since that tag aren't on it. The human cherry-picking the fix
     # fills these in (same pencil-edit flow as regular release notes).
+    # Only files that don't exist yet — an extension must never clobber
+    # notes a human already edited.
     def write_seed_notes(mdir:, repos:, base_tag:)
       template = +"# Hotfix from #{base_tag}\n\n"
       template << "_#{Notes::HOTFIX_PLACEHOLDER}; this file becomes the store release notes._\n"
 
       repos.each do |repo|
         name = repo.end_with?("convos-ios") ? "ios.md" : "android.md"
-        File.write(File.join(mdir, name), template)
+        path = File.join(mdir, name)
+        File.write(path, template) unless File.exist?(path)
       end
 
       submission = +"# Submission notes for hotfix from #{base_tag}\n\n"
       submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n"
-      File.write(File.join(mdir, "submission-notes.md"), submission)
+      spath = File.join(mdir, "submission-notes.md")
+      File.write(spath, submission) unless File.exist?(spath)
     end
 
     # Runs each repo's branch+PR steps independently, collecting per-repo
