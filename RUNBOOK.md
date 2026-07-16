@@ -17,6 +17,20 @@ Your account needs: push access to convos-ios/convos-client, org-admin (or
 equivalent bypass) for direct pushes to convos-releases `main`, and — for
 store steps — App Store Connect / Play Console access.
 
+**Contents**
+
+- [The normal week (no action required)](#the-normal-week-no-action-required)
+- [Merging the train](#merging-the-train)
+- [Promotion (automatic; how to re-run)](#promotion-automatic-how-to-re-run)
+- [Hotfix: patching an already-released version](#hotfix-patching-an-already-released-version)
+- [Manual cut (CI broken or off-schedule)](#manual-cut-ci-broken-or-off-schedule)
+- [Fully manual cut (train CLI itself unusable)](#fully-manual-cut-train-cli-itself-unusable)
+- [Manual RC upload (uploader workflows broken)](#manual-rc-upload-uploader-workflows-broken)
+- [Manual store submission (promotion broken)](#manual-store-submission-promotion-broken)
+- [Abandoning a train](#abandoning-a-train)
+- [Skipping a week / changing the cut day](#skipping-a-week--changing-the-cut-day)
+- [Troubleshooting](#troubleshooting-all-observed-live-unless-noted)
+
 ## The normal week (no action required)
 
 1. **Thursday 15:45 ET** — the `release-cut` workflow cuts `release/x.y.z`
