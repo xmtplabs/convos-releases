@@ -17,6 +17,8 @@ module Train
     TAG_RE = %r{</?[A-Za-z](?:[^<>"']|"[^"]*"|'[^']*')*>}
     # Hidden editorial text must never publish.
     COMMENT_RE = /<!--.*?-->/m
+    # <br> carries meaning — become a newline, not nothing.
+    BR_RE = %r{<br\s*/?>}i
     # Named entities CGI.unescapeHTML doesn't cover (it handles the XML
     # five plus numeric references).
     EXTRA_ENTITIES = {
@@ -55,11 +57,11 @@ module Train
       # StripDown passes raw HTML through — strip comments and tags, keep
       # the text.
       def raw_html(html)
-        html.gsub(COMMENT_RE, "").gsub(TAG_RE, "")
+        html.gsub(COMMENT_RE, "").gsub(BR_RE, "\n").gsub(TAG_RE, "")
       end
 
       def block_html(html)
-        "#{html.gsub(COMMENT_RE, "").gsub(TAG_RE, "")}\n"
+        "#{html.gsub(COMMENT_RE, "").gsub(BR_RE, "\n").gsub(TAG_RE, "")}\n"
       end
 
       def entity(text)
