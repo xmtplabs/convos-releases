@@ -61,10 +61,12 @@ the store submission from the manifest-recorded artifact, writes the
 platform notes), and comments on the PR. Everything is ensure-state — a
 failed run can be re-run and converges.
 
-To re-run when the original run is gone or never fired: Actions →
-"Promote Release" → Run workflow → enter the version. It only works for a
-version whose release/hotfix PR actually merged (shas are derived from the
-merged PR, not taken as input).
+To re-run when the original run is gone or never fired: promotion is
+per-repo, and the "Promote Release" workflow lives in EACH APP REPO — go
+to convos-client and/or convos-ios (every repo the manifest lists) →
+Actions → "Promote Release" → Run workflow → enter the version. It only
+works for a version whose release/hotfix PR actually merged there (shas
+are derived from the merged PR, not taken as input).
 
 Promotion refuses notes that still contain the hotfix seed placeholder —
 edit `releases/x.y.z/<platform>.md` on main, then re-run.
