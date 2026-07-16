@@ -9,6 +9,7 @@ require_relative "notes"
 require_relative "github"
 require_relative "cut"
 require_relative "config"
+require_relative "outputs"
 
 module Train
   # Cuts a patch release (base patch+1) from the LATEST v* tag on both app
@@ -75,6 +76,7 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
+        Outputs.emit({ "cut-version" => version, "cut-kind" => "hotfix" }, out: @out)
         Success(:hotfixed)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)

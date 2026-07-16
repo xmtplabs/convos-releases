@@ -256,6 +256,20 @@ class HotfixTest < Minitest::Test
     assert_equal "branched", data["repos"][ANDROID]["status"]
   end
 
+  def test_successful_hotfix_emits_version_outputs_for_later_steps
+    gh_output = File.join(@releases_dir, "gh_output.txt")
+    ENV["GITHUB_OUTPUT"] = gh_output
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+    contents = File.read(gh_output)
+    assert_match(/^cut-version=#{Regexp.escape(VERSION)}$/, contents)
+    assert_match(/^cut-kind=hotfix$/, contents)
+  ensure
+    ENV.delete("GITHUB_OUTPUT")
+  end
+
   # ---- checkout sync guard ----
 
   def test_unsynced_releases_checkout_is_refused_before_any_mutation

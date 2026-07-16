@@ -6,6 +6,7 @@ require "dry/monads"
 require_relative "manifest"
 require_relative "versions"
 require_relative "config"
+require_relative "outputs"
 require_relative "notes"
 require_relative "github"
 
@@ -71,6 +72,7 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
+        Outputs.emit({ "cut-version" => version, "cut-kind" => "release" }, out: @out)
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)

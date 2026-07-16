@@ -53,6 +53,34 @@ class CutTest < Minitest::Test
     Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err)
   end
 
+  def test_successful_cut_emits_version_outputs_for_later_steps
+    gh_output = File.join(@releases_dir, "gh_output.txt")
+    ENV["GITHUB_OUTPUT"] = gh_output
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    contents = File.read(gh_output)
+    assert_match(/^cut-version=2\.1\.0$/, contents)
+    assert_match(/^cut-kind=release$/, contents)
+  ensure
+    ENV.delete("GITHUB_OUTPUT")
+  end
+
+  def test_dry_run_emits_no_outputs
+    gh_output = File.join(@releases_dir, "gh_output.txt")
+    ENV["GITHUB_OUTPUT"] = gh_output
+    gh = FakeGithub.new(dry_run: true)
+    stub_clones_on(gh, version: "2.1.0")
+
+    result = new_cut(gh).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:dry_run), result
+    refute File.exist?(gh_output), "a dry-run must not emit cut outputs"
+  ensure
+    ENV.delete("GITHUB_OUTPUT")
+  end
+
   def test_unsynced_releases_checkout_is_refused_before_any_mutation
     @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "origin-tip")
     @gh.stub_rev_parse(File.basename(@releases_dir), "HEAD", "local-tip")
