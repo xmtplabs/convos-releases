@@ -7,6 +7,7 @@ require_relative "state_writer"
 require_relative "github"
 require_relative "versions"
 require_relative "notes"
+require_relative "store_notes"
 
 module Train
   # The "Promote" step: given a merged release PR (merge_sha) and the branch
@@ -44,6 +45,7 @@ module Train
         notes_dir = File.join(app_dir, ".train-promote")
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
         yield assert_notes_edited(repo: repo, version: version, notes_dir: notes_dir)
+        yield assert_notes_fit(repo: repo, version: version, notes_dir: notes_dir)
 
         yield ensure_tag(app_dir: app_dir, version: version, merge_sha: merge_sha)
 
@@ -309,7 +311,28 @@ module Train
       Success(:ok)
     end
 
+    # Play rejects release notes over 500 chars — fail with the actual
+    # overage before the tag push, not a mid-sentence truncation later.
+    def assert_notes_fit(repo:, version:, notes_dir:)
+      return Success(:ok) unless repo.end_with?("convos-client")
+
+      path = File.join(notes_dir, "android.store.txt")
+      return Success(:ok) unless File.exist?(path)
+
+      length = File.read(path, encoding: Encoding::UTF_8).length
+      return Success(:ok) if length <= StoreNotes::PLAY_LIMIT
+
+      Failure("android release notes render to #{length} chars (Play limit #{StoreNotes::PLAY_LIMIT}) — trim releases/#{version}/android.md, then re-run promotion")
+    end
+
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
+    # The .md files feed the GitHub Release (rendered markdown); the stores
+    # take plain text only, so each staged file gets a store-rendered twin.
+    STORE_RENDERS = {
+      "ios.md" => "ios.store.txt",
+      "android.md" => "android.store.txt",
+      "submission-notes.md" => "submission.store.txt"
+    }.freeze
 
     # notes_dir is recreated from scratch — a leftover .train-promote from an
     # earlier local rerun could otherwise contribute a stale file.
@@ -319,7 +342,10 @@ module Train
       src_dir = File.join(clone_dir, "releases", version)
       NOTES_FILES.each do |name|
         src = File.join(src_dir, name)
-        FileUtils.cp(src, File.join(notes_dir, name)) if File.exist?(src)
+        next unless File.exist?(src)
+
+        FileUtils.cp(src, File.join(notes_dir, name))
+        File.write(File.join(notes_dir, STORE_RENDERS[name]), StoreNotes.render(File.read(src, encoding: Encoding::UTF_8)))
       end
       @gh.rev_parse(clone_dir)
     end

@@ -107,15 +107,15 @@ platform :ios do
     UI.user_error!("TRAIN_NOTES_DIR is required and must not be empty") if notes_dir.empty?
     UI.user_error!("TRAIN_NOTES_DIR does not exist: #{notes_dir}") unless Dir.exist?(notes_dir)
 
-    ios_notes_path = File.join(notes_dir, "ios.md")
-    UI.user_error!("ios notes file missing: #{ios_notes_path}") unless File.readable?(ios_notes_path)
+    ios_notes_path = File.join(notes_dir, "ios.store.txt")
+    UI.user_error!("rendered ios notes missing (run train promote prepare first): #{ios_notes_path}") unless File.readable?(ios_notes_path)
     # ASC rejects "what's new" text over 4000 characters — truncate, don't
     # fail a finished staging over a long changelog.
-    notes_text = File.read(ios_notes_path)[0, 4000]
+    notes_text = File.read(ios_notes_path, encoding: Encoding::UTF_8)[0, 4000]
 
-    review_notes_path = File.join(notes_dir, "submission-notes.md")
-    UI.user_error!("submission notes file missing: #{review_notes_path}") unless File.readable?(review_notes_path)
-    review_notes_text = File.read(review_notes_path)
+    review_notes_path = File.join(notes_dir, "submission.store.txt")
+    UI.user_error!("rendered submission notes missing (run train promote prepare first): #{review_notes_path}") unless File.readable?(review_notes_path)
+    review_notes_text = File.read(review_notes_path, encoding: Encoding::UTF_8)
 
     deliver(
       app_identifier: PROD_BUNDLE_ID,

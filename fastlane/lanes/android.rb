@@ -173,11 +173,11 @@ platform :android do
     UI.user_error!("TRAIN_NOTES_DIR is required and must not be empty") if notes_dir.empty?
     UI.user_error!("TRAIN_NOTES_DIR does not exist: #{notes_dir}") unless Dir.exist?(notes_dir)
 
-    android_notes_path = File.join(notes_dir, "android.md")
-    UI.user_error!("android notes file missing: #{android_notes_path}") unless File.readable?(android_notes_path)
+    android_notes_path = File.join(notes_dir, "android.store.txt")
+    UI.user_error!("rendered android notes missing (run train promote prepare first): #{android_notes_path}") unless File.readable?(android_notes_path)
     # Play rejects release notes over 500 characters — truncate, don't fail
     # a finished promotion over a long changelog.
-    changelog_text = File.read(android_notes_path)[0, 500]
+    changelog_text = File.read(android_notes_path, encoding: Encoding::UTF_8)[0, 500]
 
     # Absolute path, resolved once: FastlaneFolder.path can be a memoized
     # RELATIVE "./" and supply evaluates relative paths under a different

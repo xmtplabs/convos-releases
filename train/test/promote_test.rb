@@ -80,6 +80,47 @@ class PromoteTest < Minitest::Test
     assert_match(/notes-dir=#{Regexp.escape(notes_dir)}/, out)
   end
 
+  def test_prepare_stages_store_rendered_twins_alongside_the_markdown
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Success, result
+    notes_dir = File.join(@app_dir, ".train-promote")
+    # fixture ios.md is "## Features\n- ios note\n"
+    assert_equal "Features:\n• ios note", File.read(File.join(notes_dir, "ios.store.txt"))
+    assert File.exist?(File.join(notes_dir, "android.store.txt"))
+    assert File.exist?(File.join(notes_dir, "submission.store.txt"))
+  end
+
+  def test_prepare_fails_when_android_notes_render_over_the_play_limit
+    android_repo = "xmtplabs/convos-client"
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { android_repo => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][android_repo]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+
+      File.write(File.join(mdir, "android.md"), "- #{"x" * 600}\n")
+      File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
+    end
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args.merge(repo: android_repo))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/render to \d+ chars \(Play limit 500\)/, result.failure)
+    refute @gh.called?(:push), "oversized notes must stop promotion before the tag is pushed"
+  end
+
   def test_prepare_recreates_notes_dir_dropping_stale_files
     write_manifest_fixture
     stub_matching_trees
