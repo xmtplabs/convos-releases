@@ -80,6 +80,72 @@ class PromoteTest < Minitest::Test
     assert_match(/notes-dir=#{Regexp.escape(notes_dir)}/, out)
   end
 
+  def test_prepare_stages_store_rendered_twins_alongside_the_markdown
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Success, result
+    notes_dir = File.join(@app_dir, ".train-promote")
+    # fixture ios.md is "## Features\n- ios note\n"
+    assert_equal "Features:\n• ios note", File.read(File.join(notes_dir, "ios.store.txt"))
+    assert File.exist?(File.join(notes_dir, "android.store.txt"))
+    # reviewer notes render in URL-preserving mode
+    submission = File.read(File.join(notes_dir, "submission.store.txt"), encoding: Encoding::UTF_8)
+    assert_includes submission, "env (https://test.example)"
+  end
+
+  def test_prepare_fails_before_tag_when_platform_notes_are_missing
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { REPO => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][REPO]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "build-number" => 100 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+      # no ios.md, no submission-notes.md
+    end
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/missing ios\.md, submission-notes\.md/, result.failure)
+    refute @gh.called?(:push), "missing notes must stop promotion before the tag is pushed"
+  end
+
+  def test_prepare_fails_when_android_notes_render_over_the_play_limit
+    android_repo = "xmtplabs/convos-client"
+    @gh.stub_clone("convos-releases") do |dest|
+      mdir = File.join(dest, "releases", VERSION)
+      FileUtils.mkdir_p(mdir)
+      Train::Manifest.init(
+        File.join(mdir, "manifest.yml"), version: VERSION, kind: "release", cut_date: "2026-07-16",
+        repos: { android_repo => "source-sha" }
+      )
+      data = Train::Manifest.read(File.join(mdir, "manifest.yml"))
+      data["repos"][android_repo]["rc"] = [{ "sha" => HEAD_SHA, "run" => "https://run/1", "version-code" => 77 }]
+      Train::Manifest.write(File.join(mdir, "manifest.yml"), data)
+
+      File.write(File.join(mdir, "android.md"), "- #{"x" * 600}\n")
+      File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
+    end
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+
+    result = new_promote.prepare(**base_args.merge(repo: android_repo))
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/render to \d+ chars \(Play limit 500\)/, result.failure)
+    refute @gh.called?(:push), "oversized notes must stop promotion before the tag is pushed"
+  end
+
   def test_prepare_recreates_notes_dir_dropping_stale_files
     write_manifest_fixture
     stub_matching_trees
@@ -617,6 +683,6 @@ class PromoteTest < Minitest::Test
     Train::Manifest.write(mfile, data)
     File.write(File.join(mdir, "ios.md"), "## Features\n- ios note\n")
     File.write(File.join(mdir, "android.md"), "## Features\n- android note\n")
-    File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n")
+    File.write(File.join(mdir, "submission-notes.md"), "# Submission notes\n\n[env](https://test.example)\n")
   end
 end

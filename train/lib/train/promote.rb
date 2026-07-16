@@ -7,6 +7,7 @@ require_relative "state_writer"
 require_relative "github"
 require_relative "versions"
 require_relative "notes"
+require_relative "store_notes"
 
 module Train
   # The "Promote" step: given a merged release PR (merge_sha) and the branch
@@ -43,7 +44,9 @@ module Train
         # mutated yet, not after the tag is already claimed.
         notes_dir = File.join(app_dir, ".train-promote")
         notes_sha = copy_notes(clone_dir: dir, version: version, notes_dir: notes_dir)
+        yield assert_notes_present(repo: repo, version: version, notes_dir: notes_dir)
         yield assert_notes_edited(repo: repo, version: version, notes_dir: notes_dir)
+        yield assert_notes_fit(repo: repo, version: version, notes_dir: notes_dir)
 
         yield ensure_tag(app_dir: app_dir, version: version, merge_sha: merge_sha)
 
@@ -309,7 +312,29 @@ module Train
       Success(:ok)
     end
 
+    # Play rejects release notes over 500 chars — fail with the actual
+    # overage before the tag push, not a mid-sentence truncation later.
+    def assert_notes_fit(repo:, version:, notes_dir:)
+      return Success(:ok) unless repo.end_with?("convos-client")
+
+      path = File.join(notes_dir, "android.store.txt")
+      return Success(:ok) unless File.exist?(path)
+
+      length = File.read(path, encoding: Encoding::UTF_8).length
+      return Success(:ok) if length <= StoreNotes::PLAY_LIMIT
+
+      Failure("android release notes render to #{length} chars (Play limit #{StoreNotes::PLAY_LIMIT}) — trim releases/#{version}/android.md, then re-run promotion")
+    end
+
     NOTES_FILES = %w[ios.md android.md submission-notes.md].freeze
+    # The .md files feed the GitHub Release (rendered markdown); every staged
+    # file gets a plain-text twin for the stores. Listings drop link URLs;
+    # reviewer notes keep them as "text (url)" — App Review needs them.
+    STORE_RENDERS = {
+      "ios.md" => ["ios.store.txt", :listing],
+      "android.md" => ["android.store.txt", :listing],
+      "submission-notes.md" => ["submission.store.txt", :reviewer]
+    }.freeze
 
     # notes_dir is recreated from scratch — a leftover .train-promote from an
     # earlier local rerun could otherwise contribute a stale file.
@@ -319,9 +344,30 @@ module Train
       src_dir = File.join(clone_dir, "releases", version)
       NOTES_FILES.each do |name|
         src = File.join(src_dir, name)
-        FileUtils.cp(src, File.join(notes_dir, name)) if File.exist?(src)
+        next unless File.exist?(src)
+
+        FileUtils.cp(src, File.join(notes_dir, name))
+        twin, mode = STORE_RENDERS.fetch(name)
+        text = File.read(src, encoding: Encoding::UTF_8)
+        rendered = mode == :reviewer ? StoreNotes.render_reviewer(text) : StoreNotes.render(text)
+        File.write(File.join(notes_dir, twin), rendered)
       end
       @gh.rev_parse(clone_dir)
+    end
+
+    # The staging contract the lanes rely on: the promoting platform's notes
+    # must exist (iOS also needs reviewer notes) — fail before the tag push,
+    # not in the lane afterwards.
+    def assert_notes_present(repo:, version:, notes_dir:)
+      platform = platform_for(repo)
+      return Success(:ok) unless platform
+
+      required = [platform.notes_file]
+      required << "submission-notes.md" if repo.end_with?("convos-ios")
+      missing = required.reject { |name| File.exist?(File.join(notes_dir, name)) }
+      return Success(:ok) if missing.empty?
+
+      Failure("releases/#{version}/ is missing #{missing.join(", ")} — seed/restore the notes, then re-run promotion")
     end
 
     def emit_outputs(key:, value:, version:, notes_sha:, notes_dir:)

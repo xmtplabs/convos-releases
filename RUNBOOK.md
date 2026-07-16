@@ -41,7 +41,11 @@ store steps — App Store Connect / Play Console access.
 2. **Every push to `release/x.y.z`** uploads an RC (TestFlight / Play
    internal) and records its artifact identity in the manifest.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
-   `releases/x.y.z/*.md`.
+   `releases/x.y.z/*.md`. Write markdown — the GitHub Release renders
+   it, and promotion renders plain text for the stores (headers →
+   `Header:`, bullets → `•`, links → their text; reviewer submission
+   notes keep URLs as `text (url)`). Play caps android
+   notes at 500 rendered chars; promotion fails with the count if over.
 4. **Go/no-go: comment `@convos-conductor merge`** on either repo's release
    PR — it merges BOTH repos' PRs (see "Merging the train").
 5. **Promotion runs automatically on the merge**: tags `vx.y.z`, stages the
@@ -213,10 +217,11 @@ GH_TOKEN=$(gh auth token) nix develop --command train promote prepare \
 
 - **Play**: Play Console → org.convos.android → Internal testing →
   promote the recorded versionCode to Production as a DRAFT → paste
-  `releases/x.y.z/android.md` (≤500 chars).
+  `.train-promote/android.store.txt` (the ≤500-char rendering prepare
+  staged).
 - **App Store**: App Store Connect → new App Store version x.y.z → attach
-  the recorded TestFlight build number → paste `releases/x.y.z/ios.md` +
-  reviewer notes from `submission-notes.md`.
+  the recorded TestFlight build number → paste `.train-promote/ios.store.txt`
+  + reviewer notes from `.train-promote/submission.store.txt`.
 - Record it (run where prepare ran — the GitHub Release body reads the
   notes prepare staged; also opens the hotfix back-merge PR when the
   manifest is hotfix-kind):
@@ -305,6 +310,7 @@ the manifest, not the calendar.
 | Merge: `no RC recorded for tip <sha>` | the tip's RC upload is still running or failed | Wait for / re-run the RC upload, then comment the merge command again. |
 | Merge: `<user> lacks write on <repo>` | commenter lacks push access on one participating repo | Someone with write on BOTH repos comments instead. |
 | Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
+| Promotion: `android release notes render to N chars (Play limit 500)` | android.md too long once rendered | Nothing was tagged or staged — the gate runs before any mutation. Pencil-edit `releases/x.y.z/android.md` on main to shorten (check the rendered length: `train` renders headers/bullets/links to plain text), then convos-client → Actions → "Promote Release" → Run workflow with the version. iOS promotion is independent and unaffected. |
 | Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |
 | Promotion run failed midway / never fired | transient error, or the caller workflows landed after the merge | Re-run the failed run, or Actions → "Promote Release" → dispatch with the version — everything converges. |
 | Promote queued run disappeared | a third run entered the shared store concurrency group (GitHub cancels the pending slot) | Dispatch "Promote Release" with the version. (not yet observed) |

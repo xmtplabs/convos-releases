@@ -1,6 +1,7 @@
 source "https://rubygems.org"
 
 gem "octokit", "~> 10.0"
+gem "redcarpet", "~> 3.6"
 gem "retriable", "~> 3.1"
 gem "semantic", "~> 1.6"
 gem "dry-monads", "~> 1.6"

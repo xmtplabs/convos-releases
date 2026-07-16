@@ -4,6 +4,10 @@
 # Slack, even where a default Train::Notify gets constructed.
 ENV.delete("SLACK_WEBHOOK_URL")
 
+# The nix sandbox runs under a US-ASCII locale; the store-notes bullets
+# are UTF-8 — match what real runners use.
+Encoding.default_external = Encoding::UTF_8
+
 # The repo's nix devshell wraps Ruby with GEM_HOME/GEM_PATH pinned to the
 # fastlane bundlerEnv gemset — train has no test-only deps of its own; it
 # reuses whatever's already in that gemset (octokit for train/github.rb,
