@@ -67,6 +67,18 @@ class StoreNotesTest < Minitest::Test
     assert_equal "centered note", render("<div>\ncentered note\n</div>")
   end
 
+  def test_tags_with_gt_inside_quoted_attributes_are_stripped_whole
+    assert_equal "text", render(%(<span title="1 > 0">text</span>))
+  end
+
+  def test_angle_brackets_in_prose_survive
+    assert_equal "a < b then c > d", render("a < b then c > d")
+  end
+
+  def test_images_reduce_to_alt_text
+    assert_equal "Screenshot of the fix", render("![Screenshot of the fix](https://example.com/img.png)")
+  end
+
   def test_strikethrough_is_stripped
     assert_equal "removed feature", render("~~removed~~ feature")
   end

@@ -12,7 +12,9 @@ module Train
   module StoreNotes
     PLAY_LIMIT = 500
 
-    TAG_RE = /<[^>]*>/
+    # Quote-aware (a ">" inside a quoted attribute doesn't end the tag) and
+    # anchored to elements (</? + letter) so prose like "a < b > c" survives.
+    TAG_RE = %r{</?[A-Za-z](?:[^<>"']|"[^"]*"|'[^']*')*>}
     # Named entities CGI.unescapeHTML doesn't cover (it handles the XML
     # five plus numeric references).
     EXTRA_ENTITIES = {
@@ -37,6 +39,11 @@ module Train
 
       def link(_link, _title, content)
         content
+      end
+
+      # Alt text only — StripDown would leave the raw asset URL behind.
+      def image(_link, _title, alt_text)
+        alt_text
       end
 
       def paragraph(text)
@@ -77,9 +84,13 @@ module Train
       render_with(ReviewerText.new, markdown)
     end
 
+    # The final TAG_RE pass catches tags redcarpet's tokenizer hands through
+    # as plain text (e.g. attributes containing ">"), which never reach the
+    # raw_html callback.
     def render_with(renderer, markdown)
       Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true)
                          .render(to_utf8(markdown.to_s))
+                         .gsub(TAG_RE, "")
                          .gsub(/\n{3,}/, "\n\n")
                          .strip
     end
