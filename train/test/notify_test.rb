@@ -16,6 +16,15 @@ class NotifyTest < Minitest::Test
     assert_includes text, "https://github.com/xmtplabs/convos-releases/tree/main/releases/2.1.0"
     assert_includes text, "https://github.com/xmtplabs/convos-releases/blob/main/RUNBOOK.md"
     assert_includes text, "@convos-conductor merge"
+    # PR links: head-branch search URLs, kind-prefixed
+    assert_includes text, "https://github.com/xmtplabs/convos-ios/pulls?q=is%3Apr+head%3Arelease%2F2.1.0"
+    assert_includes text, "https://github.com/xmtplabs/convos-client/pulls?q=is%3Apr+head%3Arelease%2F2.1.0"
+  end
+
+  def test_cut_text_pr_links_use_the_hotfix_prefix_for_hotfixes
+    text = Train::Notify.new(webhook_url: nil, out: @out, err: @err).cut_text(version: "2.1.1", kind: "hotfix")
+
+    assert_includes text, "head%3Ahotfix%2F2.1.1"
   end
 
   def test_post_cut_skips_with_a_note_when_webhook_unset

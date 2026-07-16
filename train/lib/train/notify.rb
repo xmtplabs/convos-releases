@@ -28,10 +28,15 @@ module Train
       @err.puts "train: warning: Slack notification failed: #{e.class}: #{e.message}"
     end
 
-    # Public and pure so the exact message is unit-testable.
+    # Public and pure so the exact message is unit-testable. PR links are
+    # head-branch search URLs — stable without knowing PR numbers.
     def cut_text(version:, kind:)
+      ios_pr = pr_link("convos-ios", kind, version)
+      android_pr = pr_link("convos-client", kind, version)
+
       <<~TEXT.strip
         🚂 *#{kind} #{version} cut* — release branches are open; every push uploads an RC.
+        • Release PRs: <#{ios_pr}|iOS> · <#{android_pr}|Android>
         • <#{RELEASES_URL}/tree/main/releases/#{version}|Release notes #{version}> — pencil-edit before merging
         • <#{RELEASES_URL}/blob/main/RUNBOOK.md|Runbook>
         When QA passes, comment `@convos-conductor merge` on a release PR.
@@ -39,6 +44,10 @@ module Train
     end
 
     private
+
+    def pr_link(repo, kind, version)
+      "https://github.com/xmtplabs/#{repo}/pulls?q=is%3Apr+head%3A#{kind}%2F#{version}"
+    end
 
     def post(text)
       uri = URI(@webhook_url)
