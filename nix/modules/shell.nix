@@ -18,6 +18,7 @@ _: {
           pkgs.bundix
           config.packages.train
           config.packages.fastlane
+          pkgs.wrangler
         ];
       };
     };

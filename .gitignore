@@ -3,3 +3,5 @@ result-*
 .bundle
 .direnv
 .direnv/**
+workers/cut-cron/.wrangler/cache/**
+workers/cut-cron/.wrangler

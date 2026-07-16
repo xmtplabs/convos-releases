@@ -360,6 +360,32 @@ class GithubTest < Minitest::Test
     assert_includes client.posts[1][:body], "mergeMethod: MERGE"
   end
 
+  def test_pr_merge_auto_merges_directly_when_pr_is_already_clean
+    # Live 2.1.0 finding: GitHub refuses to ARM auto-merge on a PR whose
+    # checks already pass ("clean status") — the tool must merge directly
+    # instead of leaving the bump PR open forever.
+    client = FakeOctokitClient.new
+    client.stub_pull_requests(
+      repo: "o/r", head: "o:bot/bump-2.2.0", state: "open",
+      result: [{ number: 12, node_id: "PR_kwdef", html_url: "x", head: { sha: "bump-tip-sha" } }]
+    )
+    client.stub_graphql_results(
+      { errors: [{ message: "Merge method squash merging is not allowed on this repository" }] },
+      { errors: [{ message: "Pull request Pull request is in clean status" }] }
+    )
+    gh = Train::Github.new(client: client, out: @out)
+
+    ok = gh.pr_merge_auto(repo: "o/r", head_or_number: "bot/bump-2.2.0")
+
+    assert_equal true, ok
+    # pinned to the looked-up tip — a commit landing in between is rejected
+    assert_equal(
+      { repo: "o/r", number: 12, options: { merge_method: "merge", sha: "bump-tip-sha" } },
+      client.instance_variable_get(:@last_merge)
+    )
+    assert_match(/already mergeable — merged directly \(MERGE\)/, @out.string)
+  end
+
   # ---- tag_sha: prefers the peeled (^{}) line for annotated tags ----
 
   FakeOkStatus = Struct.new(:success?)

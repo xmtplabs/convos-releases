@@ -322,7 +322,8 @@ module Train
           next false
         end
 
-        try_merge_methods(repo: repo, head_or_number: head_or_number, node_id: pr[:node_id])
+        try_merge_methods(repo: repo, head_or_number: head_or_number, node_id: pr[:node_id],
+                          number: pr[:number], head_sha: pr.dig(:head, :sha))
       end
     end
 
@@ -331,7 +332,7 @@ module Train
     # Tries each MERGE_METHOD in turn: a /not allowed/i GraphQL error advances
     # to the next, any other error is final. Returns true on the first
     # accepted method, false (warning) if all are rejected.
-    def try_merge_methods(repo:, head_or_number:, node_id:)
+    def try_merge_methods(repo:, head_or_number:, node_id:, number:, head_sha: nil)
       attempted = []
       last_message = nil
       MERGE_METHODS.each do |method|
@@ -341,6 +342,17 @@ module Train
 
         last_message = errors.map { |e| e[:message] }.join("; ")
         next if last_message.match?(/not allowed/i)
+
+        # GitHub refuses to ARM auto-merge on an already-mergeable PR
+        # ("clean status") — merge it directly, pinned to the tip we looked
+        # up so a commit landing in between is rejected, not merged blind.
+        if last_message.match?(/clean status/i)
+          options = { merge_method: method.downcase }
+          options[:sha] = head_sha if head_sha
+          api! { client.merge_pull_request(repo, number, "", options) }
+          @out.puts "#{repo}##{number}: already mergeable — merged directly (#{method})"
+          return true
+        end
 
         @out.puts "train: warning: auto-merge failed for #{repo}##{head_or_number} (#{method}): #{last_message}"
         return false
