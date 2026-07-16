@@ -210,7 +210,7 @@ GH_TOKEN=$(gh auth token) nix develop --command train promote prepare \
 GH_TOKEN=$(gh auth token) nix develop --command train promote record \
   --repo xmtplabs/<repo> --version x.y.z --tag vx.y.z \
   --key <version-code|build-number> --value <artifact id> \
-  --notes-sha <convos-releases main sha> --run manual
+  --notes-sha <the notes-sha value prepare printed> --run manual
 ```
 
 - Human presses "Start rollout" / "Submit for Review".
