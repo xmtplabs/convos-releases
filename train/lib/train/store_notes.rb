@@ -88,7 +88,9 @@ module Train
     # as plain text (e.g. attributes containing ">"), which never reach the
     # raw_html callback.
     def render_with(renderer, markdown)
-      Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true)
+      # autolink keeps <https://…>/<a@b.c> parsed as links — otherwise the
+      # TAG_RE pass below would eat them as pseudo-tags.
+      Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true, autolink: true)
                          .render(to_utf8(markdown.to_s))
                          .gsub(TAG_RE, "")
                          .gsub(/\n{3,}/, "\n\n")

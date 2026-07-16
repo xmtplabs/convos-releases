@@ -75,6 +75,12 @@ class StoreNotesTest < Minitest::Test
     assert_equal "a < b then c > d", render("a < b then c > d")
   end
 
+  def test_autolinks_keep_their_urls_in_both_modes
+    assert_equal "https://test.example", render("<https://test.example>")
+    assert_equal "https://test.example", Train::StoreNotes.render_reviewer("<https://test.example>")
+    assert_equal "qa@convos.org", render("<qa@convos.org>")
+  end
+
   def test_images_reduce_to_alt_text
     assert_equal "Screenshot of the fix", render("![Screenshot of the fix](https://example.com/img.png)")
   end
