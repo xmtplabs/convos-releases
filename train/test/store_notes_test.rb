@@ -73,6 +73,8 @@ class StoreNotesTest < Minitest::Test
 
   def test_entities_decode
     assert_equal "Fish & chips < more", render("Fish &amp; chips &lt; more")
+    assert_equal "© Convos — it’s here…", render("&copy; Convos &mdash; it&rsquo;s here&hellip;")
+    assert_equal "isn't numeric", render("isn&#x27;t numeric")
   end
 
   def test_tables_render_without_pipes
@@ -87,5 +89,16 @@ class StoreNotesTest < Minitest::Test
     out = Train::StoreNotes.render(bad)
     assert_includes out, "ok"
     assert_includes out, "text"
+  end
+
+  def test_mislabeled_utf8_bytes_are_reclaimed_intact
+    # A C-locale File.read tags UTF-8 bytes as US-ASCII — the é must survive.
+    mislabeled = "café fixé".dup.force_encoding(Encoding::US_ASCII)
+    assert_equal "café fixé", render(mislabeled)
+  end
+
+  def test_genuinely_latin1_input_transcodes
+    latin1 = "caf\xE9".dup.force_encoding(Encoding::ISO_8859_1)
+    assert_equal "café", render(latin1)
   end
 end

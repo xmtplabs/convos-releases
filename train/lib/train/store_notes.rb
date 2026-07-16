@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "cgi/escape"
 require "redcarpet"
 require "redcarpet/render_strip"
 
@@ -12,9 +13,12 @@ module Train
     PLAY_LIMIT = 500
 
     TAG_RE = /<[^>]*>/
-    ENTITIES = {
-      "&amp;" => "&", "&lt;" => "<", "&gt;" => ">",
-      "&quot;" => "\"", "&#39;" => "'", "&nbsp;" => " "
+    # Named entities CGI.unescapeHTML doesn't cover (it handles the XML
+    # five plus numeric references).
+    EXTRA_ENTITIES = {
+      "&nbsp;" => " ", "&copy;" => "©", "&reg;" => "®", "&trade;" => "™",
+      "&rsquo;" => "’", "&lsquo;" => "‘", "&rdquo;" => "”", "&ldquo;" => "“",
+      "&ndash;" => "–", "&mdash;" => "—", "&hellip;" => "…"
     }.freeze
 
     class StoreText < Redcarpet::Render::StripDown
@@ -49,7 +53,7 @@ module Train
       end
 
       def entity(text)
-        ENTITIES.fetch(text, text)
+        EXTRA_ENTITIES.fetch(text) { CGI.unescapeHTML(text) }
       end
     end
 
@@ -73,18 +77,26 @@ module Train
       render_with(ReviewerText.new, markdown)
     end
 
-    # Output is always UTF-8 (the bullets are), independent of the process
-    # locale a caller read the markdown under; invalid bytes are scrubbed
-    # rather than exploding inside the C extension.
     def render_with(renderer, markdown)
-      text = markdown.to_s
-      text = text.dup.force_encoding(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
-      text = text.scrub("?") unless text.valid_encoding?
-
       Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true)
-                         .render(text)
+                         .render(to_utf8(markdown.to_s))
                          .gsub(/\n{3,}/, "\n\n")
                          .strip
+    end
+
+    # Force-first, transcode-fallback: the common wrong input is UTF-8
+    # bytes mislabeled by a C locale (reclaim them intact); only bytes that
+    # aren't UTF-8 at all get transcoded from their tagged encoding, with
+    # "?" for anything unmappable — never an exception from the C extension.
+    def to_utf8(text)
+      return text if text.encoding == Encoding::UTF_8 && text.valid_encoding?
+
+      forced = text.dup.force_encoding(Encoding::UTF_8)
+      return forced if forced.valid_encoding?
+
+      text.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
+    rescue Encoding::ConverterNotFoundError
+      forced.scrub("?")
     end
   end
 end
