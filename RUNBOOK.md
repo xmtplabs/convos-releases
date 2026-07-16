@@ -36,7 +36,8 @@ store steps — App Store Connect / Play Console access.
 1. **Thursday 15:45 ET** — the `release-cut` workflow cuts `release/x.y.z`
    from both repos' dev tips: manifest + seeded notes committed to
    `releases/x.y.z/` first, then branches, version-bump PRs to dev
-   (auto-merged), and release PRs to main.
+   (auto-merged), and release PRs to main. The cut announces itself in
+   **#app** with links to the release PRs, the notes, and this runbook.
 2. **Every push to `release/x.y.z`** uploads an RC (TestFlight / Play
    internal) and records its artifact identity in the manifest.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
@@ -316,4 +317,5 @@ the manifest, not the calendar.
 | Play: `versionCode already used` | re-uploading a commit whose code was consumed | Push any new commit to the release branch (new timestamp → new code). |
 | `train X cut <old-date> is still status:cut` | an older train never completed or was never torn down | Finish it (re-dispatch reconciles) or abandon it per above. |
 | Scheduled cut didn't fire | wrong day/skip-date, or both UTC slots outside 15:45 ET | Check `release-config.yml` and the two cron slots; `train cut --force` to cut now. |
+| Cut succeeded but no #app announcement | `SLACK_WEBHOOK_APP` secret missing/rotated, or Slack outage (the cut run's log shows the skip note or warning) | Fix the secret for next time; announce manually — do NOT re-run a completed cut just for Slack. (not yet observed) |
 | Append step: `manifest append failed after 3 attempts` | push contention on convos-releases main | Re-run the failed workflow (append is idempotent), or run `train append-rc` manually. |
