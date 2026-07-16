@@ -66,7 +66,7 @@ module Train
 
       # The tag is always v<version> — a mismatched pair on a manual run would
       # promote one version but stage a Release for another.
-      unless tag == "v#{version}"
+      unless tag == Versions.tag(version)
         return Failure("record: --tag must be v#{version}, got '#{tag}'")
       end
 
@@ -101,7 +101,7 @@ module Train
     # version comes from a caller-resolved branch name and is used in paths and
     # refs — reject anything that isn't X.Y.Z first.
     def assert_version_format(version)
-      return Success(:ok) if version.match?(Versions::VERSION_RE)
+      return Success(:ok) if Versions.valid?(version)
 
       Failure("version must look like X.Y.Z, got '#{version}'")
     end
@@ -272,7 +272,7 @@ module Train
     # Idempotent state check: absent tags get pushed, already-correct is a
     # no-op, anything else is a hard failure (something else claimed the tag).
     def ensure_tag(app_dir:, version:, merge_sha:)
-      tag = "v#{version}"
+      tag = Versions.tag(version)
       existing = @gh.tag_sha(app_dir, tag)
 
       if existing.empty?
@@ -328,7 +328,7 @@ module Train
       outputs = {
         "artifact-key" => key,
         "artifact-value" => value,
-        "tag" => "v#{version}",
+        "tag" => Versions.tag(version),
         "notes-sha" => notes_sha,
         "notes-dir" => File.expand_path(notes_dir)
       }

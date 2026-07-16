@@ -30,6 +30,7 @@ GEM
     sawyer (0.9.3)
       addressable (>= 2.3.5)
       faraday (>= 0.17.3, < 3)
+    semantic (1.6.1)
     tzinfo (2.0.6)
       concurrent-ruby (~> 1.0)
     tzinfo-data (1.2026.3)
@@ -45,8 +46,9 @@ DEPENDENCIES
   dry-monads (~> 1.6)
   octokit (~> 10.0)
   retriable (~> 3.1)
+  semantic (~> 1.6)
   tzinfo (~> 2.0)
   tzinfo-data
 
 BUNDLED WITH
-   2.7.2
+   2.6.9

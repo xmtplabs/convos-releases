@@ -1,15 +1,57 @@
 # frozen_string_literal: true
 
+require "semantic"
+
 module Train
-  # Read/bump the marketing version of a convos app checkout. Layouts:
+  # Train version semantics (strict X.Y.Z — VERSION_RE gates before the
+  # semantic gem, which would accept pre-release/build suffixes) plus
+  # read/bump of an app checkout's marketing version. Layouts:
   #   convos-client: android/gradle.properties VERSION_NAME
   #   convos-ios:    Convos.xcodeproj/project.pbxproj MARKETING_VERSION
   module Versions
     class Error < StandardError; end
 
-    VERSION_RE = /\A[0-9]+\.[0-9]+\.[0-9]+\z/
+    # No leading zeros — semver forbids them and the semantic gem rejects
+    # them, so valid? and parse! must agree.
+    VERSION_RE = /\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/
 
     module_function
+
+    def valid?(version)
+      version.to_s.match?(VERSION_RE)
+    end
+
+    # parse!: Semantic::Version for a strict train version; Error otherwise
+    # (including anything the gem itself rejects — never a raw ArgumentError).
+    def parse!(version)
+      raise Error, "bad version '#{version}'" unless valid?(version)
+
+      begin
+        Semantic::Version.new(version.to_s)
+      rescue ArgumentError
+        raise Error, "bad version '#{version}'"
+      end
+    end
+
+    def next_minor(version)
+      parse!(version).increment!(:minor).to_s
+    end
+
+    def next_patch(version)
+      parse!(version).increment!(:patch).to_s
+    end
+
+    def tag(version)
+      "v#{parse!(version)}"
+    end
+
+    # "v2.1.0" -> "2.1.0"; nil for anything that isn't v + strict X.Y.Z.
+    def from_tag(tag)
+      version = tag.to_s.delete_prefix("v")
+      return nil unless tag.to_s.start_with?("v") && valid?(version)
+
+      version
+    end
 
     def layout_for(dir)
       gradle = File.join(dir, "android", "gradle.properties")

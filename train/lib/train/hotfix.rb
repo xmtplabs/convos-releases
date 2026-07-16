@@ -31,24 +31,19 @@ module Train
       @notifier = notifier || Notify.new(out: out, err: err)
     end
 
-    # Exactly vX.Y.Z — looser forms crash the patch arithmetic (v2.1) or
-    # silently drop components (v2.1.0.5).
-    BASE_TAG_RE = /\Av\d+\.\d+\.\d+\z/
-
     # run: Success(:dry_run | :hotfixed) or Failure(message).
     def run(base_tag:, only_repo: nil)
       yield guard_ref
       yield guard_synced_checkout
-      unless base_tag.match?(BASE_TAG_RE)
+      base_version = Versions.from_tag(base_tag)
+      unless base_version
         return Failure("--base-tag must look like vX.Y.Z, got '#{base_tag}'")
       end
 
       repos = yield participating_repos(only_repo)
       set_bot_remote
 
-      version = base_tag.delete_prefix("v")
-      maj, min, patch = version.split(".").map(&:to_i)
-      version = "#{maj}.#{min}.#{patch + 1}"
+      version = Versions.next_patch(base_version)
       today = Config.today_et.strftime("%F")
 
       work = Dir.mktmpdir("train-hotfix-")
