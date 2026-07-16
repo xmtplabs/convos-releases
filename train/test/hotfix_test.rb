@@ -322,6 +322,18 @@ class HotfixTest < Minitest::Test
     assert_equal 1, android_checkouts.size
   end
 
+  def test_entry_with_missing_source_sha_is_a_mismatch_failure_not_a_crash
+    existing_manifest(repos: { IOS => "ios-tag-sha" })
+    data = Train::Manifest.read(manifest_file)
+    data["repos"][IOS].delete("source-sha")
+    Train::Manifest.write(manifest_file, data)
+
+    result = new_hotfix.run(base_tag: BASE_TAG, only_repo: IOS)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/source-sha mismatch/, result.failure)
+  end
+
   def test_mismatched_existing_repo_blocks_extension
     existing_manifest(repos: { IOS => "stale-ios-sha" })
 

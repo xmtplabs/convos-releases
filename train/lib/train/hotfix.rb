@@ -155,7 +155,10 @@ module Train
         return Failure("manifest already exists for #{version} with kind #{data["kind"].inspect} (releases/#{version}/manifest.yml) — expected kind \"hotfix\"")
       end
 
-      existing, missing = repos.partition { |repo| data.dig("repos", repo, "source-sha") }
+      # Partition on key presence, not source-sha truthiness — an entry
+      # missing its source-sha (bad hand edit) must fail the mismatch check
+      # below, not crash add_repo on an already-present key.
+      existing, missing = repos.partition { |repo| data.fetch("repos", {}).key?(repo) }
       mismatched = existing.select { |repo| data.dig("repos", repo, "source-sha") != sha[repo] }
       unless mismatched.empty?
         details = mismatched.map { |repo| "#{repo}: manifest has #{data.dig("repos", repo, "source-sha").inspect}, tag now resolves to #{sha[repo].inspect}" }.join("; ")
