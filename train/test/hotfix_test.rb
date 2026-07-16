@@ -256,6 +256,83 @@ class HotfixTest < Minitest::Test
     assert_equal "branched", data["repos"][ANDROID]["status"]
   end
 
+  # ---- extension: a hotfix reaching its second platform ----
+
+  def test_single_platform_dispatch_extends_an_existing_hotfix_manifest
+    existing_manifest(repos: { IOS => "ios-tag-sha" })
+    mdir = File.join(@releases_dir, "releases", VERSION)
+    File.write(File.join(mdir, "ios.md"), "already edited by a human\n")
+
+    result = new_hotfix.run(base_tag: BASE_TAG, only_repo: ANDROID)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+
+    data = Train::Manifest.read(manifest_file)
+    assert_equal "android-tag-sha", data["repos"][ANDROID]["source-sha"]
+    assert_equal "hotfix/#{VERSION}", data["repos"][ANDROID]["release-branch"]
+    assert_equal "branched", data["repos"][ANDROID]["status"]
+    assert_equal "ios-tag-sha", data["repos"][IOS]["source-sha"], "the existing repo's entry must be untouched"
+
+    # only android participates: ios is never cloned or branched
+    clone_urls = @gh.calls_for(:clone).map { |c| c.args[0] }
+    refute(clone_urls.any? { |u| u.include?("convos-ios") })
+    assert_equal 1, @gh.calls_for(:checkout_branch).size
+
+    # the extension is committed to the manifest before any branch work
+    commit_messages = @gh.calls_for(:commit).map { |c| c.args[1] }
+    assert(commit_messages.any? { |m| m.include?("extend hotfix #{VERSION} to #{ANDROID}") })
+
+    # android notes seeded; ios notes preserved verbatim
+    assert_match(/#{Train::Notes::HOTFIX_PLACEHOLDER}/, File.read(File.join(mdir, "android.md")))
+    assert_equal "already edited by a human\n", File.read(File.join(mdir, "ios.md"))
+  end
+
+  def test_extension_resets_a_promoted_top_level_status
+    existing_manifest(repos: { IOS => "ios-tag-sha" })
+    Train::Manifest.record_promotion(
+      manifest_file, repo: IOS, key: "build-number", value: "100",
+      tag: "v#{VERSION}", notes_sha: "n", run: "r"
+    )
+    assert_equal "promoted", Train::Manifest.read(manifest_file)["status"]
+
+    result = new_hotfix.run(base_tag: BASE_TAG, only_repo: ANDROID)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+    data = Train::Manifest.read(manifest_file)
+    assert_equal "branched", data["status"], "an in-flight repo means the train is no longer promoted"
+    assert_equal "promoted", data["repos"][IOS]["status"], "the shipped repo's state must survive"
+    refute_nil data["repos"][IOS]["promoted"]
+  end
+
+  def test_both_platform_dispatch_converges_existing_and_extends_missing
+    existing_manifest(repos: { IOS => "ios-tag-sha" })
+    @gh.stub_ls_remote("convos-ios", "refs/heads/hotfix/#{VERSION}", "ios-branch-tip")
+    @gh.stub_pr_list(repo: IOS, head: "hotfix/#{VERSION}", base: "main", state: "open",
+                      result: [{ "number" => 5, "url" => "https://x/5", "merged_at" => nil }])
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+    data = Train::Manifest.read(manifest_file)
+    assert_equal [ANDROID, IOS].sort, data["repos"].keys.sort
+
+    ios_checkouts = @gh.calls_for(:checkout_branch).select { |c| c.args[0].end_with?("/convos-ios") }
+    assert_empty ios_checkouts, "the existing repo converges — no recreation"
+    android_checkouts = @gh.calls_for(:checkout_branch).select { |c| c.args[0].end_with?("/convos-client") }
+    assert_equal 1, android_checkouts.size
+  end
+
+  def test_mismatched_existing_repo_blocks_extension
+    existing_manifest(repos: { IOS => "stale-ios-sha" })
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/source-sha mismatch/, result.failure)
+    data = Train::Manifest.read(manifest_file)
+    refute data["repos"].key?(ANDROID), "a collision must not extend the manifest"
+  end
+
   # ---- version arithmetic ----
 
   def test_version_arithmetic_v2_1_0_to_2_1_1

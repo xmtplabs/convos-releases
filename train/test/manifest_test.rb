@@ -226,6 +226,33 @@ class ManifestTest < Minitest::Test
     end
   end
 
+  # ---- add_repo ----
+
+  def test_add_repo_appends_a_pending_entry_and_resets_top_level_status
+    init_with_one_repo
+    Train::Manifest.set_status(file, "promoted")
+
+    Train::Manifest.add_repo(file, repo: "xmtplabs/convos-client", sha: "sha-android", branch: "hotfix/2.1.0")
+
+    data = Train::Manifest.read(file)
+    entry = data["repos"]["xmtplabs/convos-client"]
+    assert_equal(
+      { "source-sha" => "sha-android", "release-branch" => "hotfix/2.1.0", "status" => "pending", "rc" => [] },
+      entry
+    )
+    assert_equal "branched", data["status"]
+    assert_equal "sha-ios", data["repos"]["xmtplabs/convos-ios"]["source-sha"]
+  end
+
+  def test_add_repo_refuses_an_already_present_repo
+    init_with_one_repo
+
+    err = assert_raises(Train::Manifest::Error) do
+      Train::Manifest.add_repo(file, repo: "xmtplabs/convos-ios", sha: "other", branch: "hotfix/2.1.0")
+    end
+    assert_match(/already in manifest/, err.message)
+  end
+
   private
 
   def init_with_one_repo
