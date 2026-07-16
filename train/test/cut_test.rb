@@ -53,6 +53,17 @@ class CutTest < Minitest::Test
     Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err)
   end
 
+  def test_unsynced_releases_checkout_is_refused_before_any_mutation
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "origin-tip")
+    @gh.stub_rev_parse(File.basename(@releases_dir), "HEAD", "local-tip")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/not at origin\/main/, result.failure)
+    refute @gh.called?(:clone), "an unsynced checkout must fail before touching any repo"
+  end
+
   def test_dry_run_produces_plan_and_zero_mutations
     gh = FakeGithub.new(dry_run: true)
     stub_clones_on(gh, version: "2.1.0")

@@ -36,6 +36,7 @@ module Train
       return Success(:skipped) if decision == :skipped
 
       yield guard_ref
+      yield guard_synced_checkout
       set_bot_remote
 
       today = date.strftime("%F")
@@ -94,6 +95,19 @@ module Train
       return Success(:ok) unless ref && ref != "main"
 
       Failure("release-cut must run from main (got #{ref})")
+    end
+
+    # Same hazard as Hotfix#guard_synced_checkout: a locally-committed
+    # manifest whose push failed must not survive into a retry, and a stale
+    # checkout must not feed reconcile old ledger state.
+    def guard_synced_checkout
+      remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
+      return Success(:ok) if remote.empty?
+
+      local = @gh.rev_parse(@releases_dir, "HEAD")
+      return Success(:ok) if local == remote
+
+      Failure("convos-releases checkout is not at origin/main (local #{local}, origin #{remote}) — reset/pull, then retry")
     end
 
     def set_bot_remote

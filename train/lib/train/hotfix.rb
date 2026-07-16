@@ -36,6 +36,7 @@ module Train
     # run: Success(:dry_run | :hotfixed) or Failure(message).
     def run(base_tag:, only_repo: nil)
       yield guard_ref
+      yield guard_synced_checkout
       unless base_tag.match?(BASE_TAG_RE)
         return Failure("--base-tag must look like vX.Y.Z, got '#{base_tag}'")
       end
@@ -88,6 +89,21 @@ module Train
       return Success(:ok) unless ref && ref != "main"
 
       Failure("release-cut must run from main (got #{ref})")
+    end
+
+    # The checkout must be AT origin/main: a locally-committed manifest
+    # whose push failed would otherwise survive into a retry, where
+    # reconcile reads it as already-recorded and skips the push — breaking
+    # manifest-first. A stale (behind) checkout is refused for the same
+    # reason: decisions would be made against old ledger state.
+    def guard_synced_checkout
+      remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
+      return Success(:ok) if remote.empty?
+
+      local = @gh.rev_parse(@releases_dir, "HEAD")
+      return Success(:ok) if local == remote
+
+      Failure("convos-releases checkout is not at origin/main (local #{local}, origin #{remote}) — reset/pull, then retry")
     end
 
     def participating_repos(only_repo)

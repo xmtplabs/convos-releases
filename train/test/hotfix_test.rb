@@ -256,6 +256,25 @@ class HotfixTest < Minitest::Test
     assert_equal "branched", data["repos"][ANDROID]["status"]
   end
 
+  # ---- checkout sync guard ----
+
+  def test_unsynced_releases_checkout_is_refused_before_any_mutation
+    # Origin main moved past (or never got) the local HEAD — e.g. a prior
+    # run committed the manifest locally but its push failed.
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "origin-tip")
+    @gh.stub_rev_parse(File.basename(@releases_dir), "HEAD", "local-tip")
+
+    result = new_hotfix.run(base_tag: BASE_TAG)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/not at origin\/main \(local local-tip, origin origin-tip\)/, result.failure)
+    refute @gh.called?(:clone), "an unsynced checkout must fail before touching any repo"
+
+    # synced checkout proceeds normally
+    @gh.stub_rev_parse(File.basename(@releases_dir), "HEAD", "origin-tip")
+    assert_equal Dry::Monads::Success(:hotfixed), new_hotfix.run(base_tag: BASE_TAG)
+  end
+
   # ---- extension: a hotfix reaching its second platform ----
 
   def test_single_platform_dispatch_extends_an_existing_hotfix_manifest
