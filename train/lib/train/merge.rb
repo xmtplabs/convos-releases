@@ -29,7 +29,7 @@ module Train
     def run(version:, actor:)
       # version comes from a caller-resolved branch name and is used in paths
       # and refs — reject anything that isn't X.Y.Z first.
-      unless version.match?(Versions::VERSION_RE)
+      unless Versions.valid?(version)
         return Failure("version must look like X.Y.Z, got '#{version}'")
       end
 

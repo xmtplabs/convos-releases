@@ -48,8 +48,7 @@ module Train
         version = yield agree_on_version(captures)
         version = yield reconcile_in_flight(version, today)
 
-        maj, min, = version.split(".").map(&:to_i)
-        nxt = "#{maj}.#{min + 1}.0"
+        nxt = Versions.next_minor(version)
         @out.puts "Cutting release/#{version}; dev moves to #{nxt}"
 
         sha = captures.transform_values { |c| c[:sha] }

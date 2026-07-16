@@ -137,6 +137,16 @@
     };
     version = "0.9.3";
   };
+  semantic = {
+    groups = ["default"];
+    platforms = [];
+    source = {
+      remotes = ["https://rubygems.org"];
+      sha256 = "0qy1s2kpf9z2p99v23b126ij424yamxviprz59wbp3hrb67v9nrw";
+      type = "gem";
+    };
+    version = "1.6.1";
+  };
   tzinfo = {
     dependencies = ["concurrent-ruby"];
     groups = ["default"];
