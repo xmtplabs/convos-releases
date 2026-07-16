@@ -15,6 +15,8 @@ module Train
     # Quote-aware (a ">" inside a quoted attribute doesn't end the tag) and
     # anchored to elements (</? + letter) so prose like "a < b > c" survives.
     TAG_RE = %r{</?[A-Za-z](?:[^<>"']|"[^"]*"|'[^']*')*>}
+    # Hidden editorial text must never publish.
+    COMMENT_RE = /<!--.*?-->/m
     # Named entities CGI.unescapeHTML doesn't cover (it handles the XML
     # five plus numeric references).
     EXTRA_ENTITIES = {
@@ -50,13 +52,14 @@ module Train
         "#{text}\n\n"
       end
 
-      # StripDown passes raw HTML through — strip the tags, keep the text.
+      # StripDown passes raw HTML through — strip comments and tags, keep
+      # the text.
       def raw_html(html)
-        html.gsub(TAG_RE, "")
+        html.gsub(COMMENT_RE, "").gsub(TAG_RE, "")
       end
 
       def block_html(html)
-        "#{html.gsub(TAG_RE, "")}\n"
+        "#{html.gsub(COMMENT_RE, "").gsub(TAG_RE, "")}\n"
       end
 
       def entity(text)
@@ -92,7 +95,9 @@ module Train
       # TAG_RE pass below would eat them as pseudo-tags.
       Redcarpet::Markdown.new(renderer, strikethrough: true, tables: true, autolink: true)
                          .render(to_utf8(markdown.to_s))
+                         .gsub(COMMENT_RE, "")
                          .gsub(TAG_RE, "")
+                         .gsub(/[ \t]{2,}/, " ")
                          .gsub(/\n{3,}/, "\n\n")
                          .strip
     end

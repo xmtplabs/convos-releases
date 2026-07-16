@@ -85,6 +85,11 @@ class StoreNotesTest < Minitest::Test
     assert_equal "Screenshot of the fix", render("![Screenshot of the fix](https://example.com/img.png)")
   end
 
+  def test_html_comments_never_publish
+    assert_equal "visible", render("<!-- internal: reword before ship -->\nvisible")
+    assert_equal "before after", render("before <!-- hidden --> after")
+  end
+
   def test_strikethrough_is_stripped
     assert_equal "removed feature", render("~~removed~~ feature")
   end
