@@ -3,3 +3,5 @@ result-*
 .bundle
 .direnv
 .direnv/**
+.wrangler/
+wrangler-account.json
