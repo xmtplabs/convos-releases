@@ -27,12 +27,79 @@ store steps — App Store Connect / Play Console access.
    internal) and records its artifact identity in the manifest.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
    `releases/x.y.z/*.md`.
-4. **Merge of the release PR** (go/no-go) → Phase-2 promotion stages the
-   store submissions from the manifest-recorded artifacts. Until Phase 2
-   ships: submit manually from the QA'd artifacts (see "Manual store
-   submission").
-5. Check state at any point: `train status x.y.z`, or read
+4. **Go/no-go: comment `@convos-conductor merge`** on either repo's release
+   PR — it merges BOTH repos' PRs (see "Merging the train").
+5. **Promotion runs automatically on the merge**: tags `vx.y.z`, stages the
+   Play production draft and the App Store version (build attached, notes
+   filled), creates the GitHub Releases, records `promoted` in the
+   manifest, and comments on the PRs.
+6. **Humans press the store buttons**: Play Console "Start rollout",
+   App Store Connect "Submit for Review". That's the only manual step.
+7. Check state at any point: `train status x.y.z`, or read
    `releases/x.y.z/manifest.yml`.
+
+## Merging the train
+
+Comment exactly `@convos-conductor merge` (as the first line) on either
+repo's release/hotfix PR. Org members/collaborators only; the tool
+re-verifies YOUR write access on every participating repo before merging
+anything. It merges every repo in the manifest, refuses any PR whose tip
+has no recorded RC ("no RC recorded for tip …" = wait for the upload), and
+pins each merge to the tip it verified. Rerun-safe: an already-merged repo
+is a no-op.
+
+Merging via the GitHub UI also works (per repo, **merge commit only** —
+squash/rebase changes the tree and promotion will refuse it), but you lose
+the RC gate until branch protection enforces the checks.
+
+## Promotion (automatic; how to re-run)
+
+Triggered by the release PR's merge commit landing on main. Per repo it:
+verifies the merge tree matches the RC'd branch tip, tags `vx.y.z`, stages
+the store submission from the manifest-recorded artifact, writes the
+`promoted` block to the manifest, creates the GitHub Release (body =
+platform notes), and comments on the PR. Everything is ensure-state — a
+failed run can be re-run and converges.
+
+To re-run when the original run is gone or never fired: Actions →
+"Promote Release" → Run workflow → enter the version. It only works for a
+version whose release/hotfix PR actually merged (shas are derived from the
+merged PR, not taken as input).
+
+Promotion refuses notes that still contain the hotfix seed placeholder —
+edit `releases/x.y.z/<platform>.md` on main, then re-run.
+
+## Hotfix: patching an already-released version
+
+Ships a patch on top of the latest release without waiting for the weekly
+train. The base tag must be the LATEST `v*` tag on every participating
+repo — you can't hotfix an older line.
+
+1. **Cut**: Actions → "Release Cut" → Run workflow with
+   `hotfix-base-tag: vx.y.z` (optionally `hotfix-repo: xmtplabs/convos-ios`
+   for a single-platform hotfix). Locally:
+   `train hotfix --base-tag vx.y.z --dry-run` first, then without.
+   This creates `releases/x.y.(z+1)/` (kind: hotfix, template notes) and,
+   per repo, a `hotfix/x.y.(z+1)` branch at the tag plus a version-bump
+   commit, with a PR to main. No dev bump (dev is already ahead).
+2. **Land the fix**: cherry-pick the fix commits onto `hotfix/x.y.(z+1)`
+   and push. Every push uploads an RC and records it in the manifest,
+   same as a release branch.
+3. **Describe the fix**: the seeded notes are a placeholder template —
+   pencil-edit `releases/x.y.(z+1)/*.md`. Promotion refuses unedited
+   placeholders.
+4. **Merge**: `@convos-conductor merge` on the hotfix PR.
+5. **Promotion** runs as above, plus: it opens a **back-merge PR**
+   `hotfix/x.y.(z+1)` → dev BEFORE recording anything (if that PR can't be
+   created, promotion fails rather than losing the fix from dev). Expect a
+   version-file conflict on the back-merge — dev is on the next minor;
+   resolve it keeping dev's version.
+6. **Press the store buttons.**
+
+Rerun-safe: re-dispatching the same hotfix reconciles (manifest kind and
+source shas must match; a hotfix branch is verified by ancestry). A
+`hotfix/…` branch auto-deleted on merge is restored automatically for the
+back-merge.
 
 ## Manual cut (CI broken or off-schedule)
 
@@ -100,9 +167,10 @@ GH_TOKEN=$(gh auth token) nix develop --command train append-rc \
 # iOS: --key build-number --value <CFBundleVersion the lane printed>
 ```
 
-## Manual store submission (Phase 2 not yet automated)
+## Manual store submission (promotion broken)
 
-Use ONLY manifest-recorded artifacts (`train status x.y.z`):
+Normally promotion stages all of this — use these steps only when it's
+down. Use ONLY manifest-recorded artifacts (`train status x.y.z`):
 
 - **Play**: Play Console → org.convos.android → Internal testing →
   promote the recorded versionCode to Production as a DRAFT → paste
@@ -113,6 +181,10 @@ Use ONLY manifest-recorded artifacts (`train status x.y.z`):
   reviewer notes from `submission-notes.md` → human presses
   "Submit for Review".
 - Tag both repos: `git tag vX.Y.Z <merge-commit> && git push origin vX.Y.Z`.
+- Record it: `train promote record --repo <repo> --version x.y.z
+  --tag vx.y.z --key <version-code|build-number> --value <artifact id>
+  --notes-sha <convos-releases main sha> --run manual` (also opens the
+  hotfix back-merge PR when the manifest is hotfix-kind).
 
 ## Abandoning a train
 
@@ -160,12 +232,20 @@ place of the scheduled one, cut with `--force`, then add that week's
 cut-day date to `skip-dates` (a train in `status: branched` doesn't block
 the next cut — without the skip entry you'd cut TWO trains that week).
 
-## Troubleshooting (all observed live)
+## Troubleshooting (all observed live unless noted)
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Cut fails: `manifest push ... failed (non-fast-forward? retry the cut)` | main ruleset rejected the push (actor not bypass-listed) or a real race with an append | Ensure `convos-conductor` is in the main ruleset's bypass list; workflow checkout must use `persist-credentials: false` (a persisted GITHUB_TOKEN header overrides the bot token). Races: just re-dispatch. |
 | `release/x.y.z exists at <sha>, expected <sha>` | a branch with that name predates the cut (e.g. a manual release branch) | Confirm it's stale with its owner, delete it, re-dispatch (reconcile completes the rest). |
+| Merge: `no RC recorded for tip <sha>` | the tip's RC upload is still running or failed | Wait for / re-run the RC upload, then comment the merge command again. |
+| Merge: `<user> lacks write on <repo>` | commenter lacks push access on one participating repo | Someone with write on BOTH repos comments instead. |
+| Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
+| Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |
+| Promotion run failed midway / never fired | transient error, or the caller workflows landed after the merge | Re-run the failed run, or Actions → "Promote Release" → dispatch with the version — everything converges. |
+| Promote queued run disappeared | a third run entered the shared store concurrency group (GitHub cancels the pending slot) | Dispatch "Promote Release" with the version. (not yet observed) |
+| Hotfix: `<tag> is not the latest tag on <repo>` | trying to hotfix an old release line | Only the latest release can be hotfixed; ship a normal train instead. |
+| Back-merge PR conflicts | expected: dev is on the next minor, both touched version files | Resolve on the back-merge PR keeping DEV's version. |
 | Bump commit: `Author identity unknown` | bot git identity not configured in a fresh clone | Fixed in the tool (regression-tested); if seen, update the pinned train. |
 | `Merge method X is not allowed on this repository` warning | repo forbids that merge method | Tool falls back SQUASH→MERGE→REBASE; if all fail, arm manually: `gh pr merge <n> --auto --merge`. |
 | iOS: `No matching provisioning profiles found ... readonly` | a lane requests a bundle id whose profile isn't in convos-certificates (check the match error's "available profiles" list) | Add the id to convos-ios `fastlane/Matchfile`, register the App ID if new (`fastlane produce --skip_itc -a <id>`), run `fastlane ios sync_match type:appstore`. |
