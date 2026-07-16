@@ -6,6 +6,7 @@ require "dry/monads"
 require_relative "manifest"
 require_relative "versions"
 require_relative "config"
+require_relative "notify"
 require_relative "notes"
 require_relative "github"
 
@@ -21,11 +22,12 @@ module Train
 
     REPOS = %w[xmtplabs/convos-ios xmtplabs/convos-client].freeze
 
-    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr)
+    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil)
       @gh = github
       @releases_dir = releases_dir
       @out = out
       @err = err
+      @notifier = notifier || Notify.new(out: out, err: err)
     end
 
     # run: Success(:skipped | :dry_run | :cut) or Failure(message).
@@ -71,6 +73,7 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
+        @notifier.post_cut(version: version, kind: "release")
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)

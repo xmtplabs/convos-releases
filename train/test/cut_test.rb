@@ -6,6 +6,7 @@ require "fileutils"
 require "dry/monads"
 require "train/cut"
 require_relative "support/fake_github"
+require_relative "support/fake_notifier"
 
 class CutTest < Minitest::Test
   EDT_THU = "2026-07-16" # forces the slot decision to "go" without needing --force
@@ -49,8 +50,28 @@ class CutTest < Minitest::Test
     )
   end
 
-  def new_cut(gh = @gh)
-    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err)
+  def new_cut(gh = @gh, notifier: nil)
+    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err, notifier: notifier || FakeNotifier.new)
+  end
+
+  def test_successful_cut_announces_in_slack
+    notifier = FakeNotifier.new
+
+    result = new_cut(notifier: notifier).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_equal [{ version: "2.1.0", kind: "release" }], notifier.cuts
+  end
+
+  def test_dry_run_does_not_announce
+    gh = FakeGithub.new(dry_run: true)
+    stub_clones_on(gh, version: "2.1.0")
+    notifier = FakeNotifier.new
+
+    result = new_cut(gh, notifier: notifier).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:dry_run), result
+    assert_empty notifier.cuts, "a dry-run must not announce a cut"
   end
 
   def test_unsynced_releases_checkout_is_refused_before_any_mutation

@@ -6,6 +6,7 @@ require "fileutils"
 require "dry/monads"
 require "train/hotfix"
 require_relative "support/fake_github"
+require_relative "support/fake_notifier"
 
 class HotfixTest < Minitest::Test
   IOS = "xmtplabs/convos-ios"
@@ -48,8 +49,8 @@ class HotfixTest < Minitest::Test
     )
   end
 
-  def new_hotfix(gh = @gh)
-    Train::Hotfix.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err)
+  def new_hotfix(gh = @gh, notifier: nil)
+    Train::Hotfix.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err, notifier: notifier || FakeNotifier.new)
   end
 
   def manifest_file(version = VERSION)
@@ -254,6 +255,15 @@ class HotfixTest < Minitest::Test
 
     data = Train::Manifest.read(manifest_file)
     assert_equal "branched", data["repos"][ANDROID]["status"]
+  end
+
+  def test_successful_hotfix_announces_in_slack
+    notifier = FakeNotifier.new
+
+    result = new_hotfix(notifier: notifier).run(base_tag: BASE_TAG)
+
+    assert_equal Dry::Monads::Success(:hotfixed), result
+    assert_equal [{ version: VERSION, kind: "hotfix" }], notifier.cuts
   end
 
   # ---- checkout sync guard ----

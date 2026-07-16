@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 
+# A developer shell may carry a real webhook — tests must never post to
+# Slack, even where a default Train::Notify gets constructed.
+ENV.delete("SLACK_WEBHOOK_URL")
+
 # The repo's nix devshell wraps Ruby with GEM_HOME/GEM_PATH pinned to the
 # fastlane bundlerEnv gemset — train has no test-only deps of its own; it
 # reuses whatever's already in that gemset (octokit for train/github.rb,

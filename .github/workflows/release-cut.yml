@@ -64,9 +64,12 @@ jobs:
 
       # A non-empty hotfix-base-tag switches this step to `train hotfix`
       # instead of `train cut` (hotfix is dispatch-only, no force flag).
+      # A real cut announces itself in Slack (Train::Notify) — best-effort,
+      # and skipped with a note when SLACK_WEBHOOK_URL is unset.
       - name: Cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_APP }}
           TRAIN_SCHEDULE: ${{ github.event.schedule }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
