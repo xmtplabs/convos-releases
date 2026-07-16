@@ -294,9 +294,9 @@ order — add Thursday's date to `skip-dates` FIRST (before 15:45 ET), then
 force-dispatch on Friday. Whichever day the schedule could still fire on
 must be skipped before it arrives.
 
-**Change the day permanently**: edit `cut-day`. The two cron slots in
-`release-cut.yml` fire daily — the config decides which day acts — so no
-workflow edit is needed.
+**Change the day permanently**: edit `cut-day`. The cut-cron worker
+(workers/cut-cron) fires its two slots daily — the config decides which
+day acts — so no worker or workflow edit is needed.
 
 Everything downstream is day-agnostic: RCs, merge, and promotion key off
 the manifest, not the calendar.
@@ -322,6 +322,6 @@ the manifest, not the calendar.
 | iOS: `Invalid Pre-Release Train ... '<ver>' is closed` | that version already shipped on the App Store | The train's version is stale — abandon it; ensure dev's bump merged; next cut uses the next version. |
 | Play: `versionCode already used` | re-uploading a commit whose code was consumed | Push any new commit to the release branch (new timestamp → new code). |
 | `train X cut <old-date> is still status:cut` | an older train never completed or was never torn down | Finish it (re-dispatch reconciles) or abandon it per above. |
-| Scheduled cut didn't fire | wrong day/skip-date, or both UTC slots outside 15:45 ET | Check `release-config.yml` and the two cron slots; `train cut --force` to cut now. |
+| Scheduled cut didn't fire | wrong day/skip-date, or the cut-cron worker is down (Cloudflare logs; it pings #app on dispatch failure) | Check `release-config.yml` and workers/cut-cron; `train cut --force` (or Actions → Release Cut → Run workflow) to cut now. |
 | Cut succeeded but no #app announcement | `SLACK_WEBHOOK_APP` secret missing/rotated, or Slack outage (the cut run's log shows the skip note or warning) | Fix the secret for next time; announce manually — do NOT re-run a completed cut just for Slack. (not yet observed) |
 | Append step: `manifest append failed after 3 attempts` | push contention on convos-releases main | Re-run the failed workflow (append is idempotent), or run `train append-rc` manually. |

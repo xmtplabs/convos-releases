@@ -4,14 +4,17 @@
 # this only plumbs credentials and the trigger context.
 name: Release Cut
 
+# The weekly trigger is the cut-cron Cloudflare Worker (workers/cut-cron):
+# GitHub's own schedule trigger lags 15-25 minutes, and keeping it alongside
+# the worker risks cutting a second train after dev's version bump. The
+# worker dispatches with the `schedule` input set to the slot string.
 on:
-  schedule:
-    # Both correspond to 15:45 America/New_York across DST; the slot
-    # decision step keeps exactly one.
-    - cron: "45 19 * * *"
-    - cron: "45 20 * * *"
   workflow_dispatch:
     inputs:
+      schedule:
+        description: "Slot string for a scheduled fire (set by cut-cron; leave empty for manual runs)"
+        type: string
+        default: ""
       force:
         description: Bypass day/skip checks
         type: boolean
@@ -70,7 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_APP }}
-          TRAIN_SCHEDULE: ${{ github.event.schedule }}
+          TRAIN_SCHEDULE: ${{ inputs.schedule || '' }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
           TRAIN_HOTFIX_BASE_TAG: ${{ inputs.hotfix-base-tag || '' }}

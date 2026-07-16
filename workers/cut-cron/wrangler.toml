@@ -1,0 +1,9 @@
+name = "convos-cut-cron"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Daily, both slots — 15:45 America/New_York across DST. Which day acts is
+# release-config.yml's cut-day (train skips the rest), so changing the cut
+# day stays a config-only edit; train's slot decision keeps exactly one slot.
+[triggers]
+crons = ["45 19 * * *", "45 20 * * *"]
