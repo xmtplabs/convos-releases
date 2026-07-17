@@ -1,12 +1,12 @@
 version: 2.1.1
 kind: hotfix
 cut-date: '2026-07-17'
-status: branched
+status: promoted
 repos:
   xmtplabs/convos-client:
     source-sha: 7ee979b471cbd92ae934b30d99f7a1549dbb02b6
     release-branch: hotfix/2.1.1
-    status: rc-available
+    status: promoted
     rc:
     - sha: 9d2b4fbb3017cb4348cc98a10dd94b8a212218ea
       run: https://github.com/xmtplabs/convos-client/actions/runs/29611694800
@@ -14,3 +14,8 @@ repos:
     - sha: 6479c24a56e8a293b07be7bf7be8acbc0e32a79c
       run: https://github.com/xmtplabs/convos-client/actions/runs/29617847081
       version-code: 29738785
+    promoted:
+      version-code: 29738785
+      tag: v2.1.1
+      notes-sha: 7a0966e7e23a802277a5b3dfa2fb887a2fbcc03b
+      run: https://github.com/xmtplabs/convos-client/actions/runs/29620013144
