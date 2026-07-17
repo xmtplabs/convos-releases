@@ -214,6 +214,15 @@ module Train
       run!(["git", "-C", dir, "checkout", "--quiet", "-B", branch, sha])
     end
 
+    # `git reset --hard ref` — forcibly resets `dir`'s checkout to `ref`,
+    # discarding any local commits/changes. Local-only (no push). Used to
+    # recover from a failed persist push: the local checkout would otherwise
+    # sit one commit ahead of origin, wedging the next run's
+    # guard_synced_checkout until a human resets it.
+    def reset_hard(dir, ref)
+      run!(["git", "-C", dir, "reset", "--hard", ref])
+    end
+
     # ---- mutating operations: no-op (but logged) under dry-run ----
 
     def git_config_bot(dir)

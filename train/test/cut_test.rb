@@ -599,6 +599,54 @@ class CutTest < Minitest::Test
     assert_match(/status\/anchor persist failed/i, @err.string)
   end
 
+  def test_status_push_failure_resets_local_checkout_to_origin_main
+    # A failed persist push leaves @releases_dir one commit ahead of
+    # origin/main. Left alone, the NEXT run's guard_synced_checkout would
+    # hard-fail forever until a human intervenes. reset_hard is the
+    # best-effort fix: origin/main stays the source of truth.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    # Only the SECOND push against @releases_dir fails — the first is the
+    # initial manifest commit, which must succeed for the run to reach
+    # persist_statuses at all.
+    @gh.fail_push_from_call(File.basename(@releases_dir), 2)
+    # Matches rev_parse's default ("sha-<dir-suffix>") so the initial
+    # guard_synced_checkout passes; reset_hard is asserted against this sha.
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "sha-#{File.basename(@releases_dir)}")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status push failed/i, @err.string)
+    resets = @gh.calls_for(:reset_hard).select { |c| c.args.first == @releases_dir }
+    assert resets.any?, "expected reset_hard to be called against @releases_dir after the failed push"
+    assert_equal "sha-#{File.basename(@releases_dir)}", resets.last.args[1]
+  end
+
+  def test_status_push_failure_reset_failure_is_still_only_a_warning
+    # reset_hard is itself best-effort — if it raises (e.g. the checkout is
+    # in a weird state), the cut must still be reported as a success; only a
+    # warning is logged.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_push_from_call(File.basename(@releases_dir), 2)
+    # Matches rev_parse's default ("sha-<dir-suffix>") so the initial
+    # guard_synced_checkout passes; reset_hard is asserted against this sha.
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "sha-#{File.basename(@releases_dir)}")
+    @gh.fail_reset_hard(File.basename(@releases_dir), message: "simulated reset failure")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status push failed/i, @err.string)
+  end
+
   def test_ai_notes_request_fires_even_when_status_persist_raises
     # The AI-notes hand-off must not be skipped just because the best-effort
     # status/anchor commit blew up — the anchor write into the manifest

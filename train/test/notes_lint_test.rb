@@ -99,6 +99,25 @@ class NotesLintTest < Minitest::Test
     end
   end
 
+  def test_reviewer_placeholder_without_markdown_emphasis_is_still_an_error
+    # An AI draft can reproduce the seeded sentence without the surrounding
+    # _.._ emphasis markup; the lint must catch it on the core phrase alone.
+    stripped = Train::Notes::REVIEWER_PLACEHOLDER.delete("_")
+    with_dir({ "submission-notes.md" => "#{stripped}\n" }) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/placeholder/, report[:errors].first)
+    end
+  end
+
+  def test_ordinary_mention_of_app_reviewers_in_a_different_sentence_passes
+    with_dir({ "submission-notes.md" => "Note for app reviewers: nothing new to test here.\n" }) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+    end
+  end
+
   def test_wrong_case_kind_is_an_error
     with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "Release") do |dir|
       report = Train::NotesLint.check(dir)

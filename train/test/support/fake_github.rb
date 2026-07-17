@@ -22,6 +22,8 @@ class FakeGithub
     @pr_lists = Hash.new { |h, k| h[k] = [] } # [repo, head, base, state] => [{...}]
     @pushes_fail = {}       # dir_suffix => true/false
     @push_fail_countdown = Hash.new(0) # refspec => remaining failures before success
+    @push_fail_from_call = {} # dir_suffix => 1-indexed call number to start failing at
+    @push_call_count = Hash.new(0) # dir_suffix => calls seen so far
     @clone_error_countdown = Hash.new(0) # url-substring => remaining CommandErrors before success
     @pr_merge_results = Hash.new(true)
     @releases = {} # [repo, tag] => true
@@ -72,6 +74,15 @@ class FakeGithub
 
   def fail_push(dir_suffix)
     @pushes_fail[dir_suffix] = true
+  end
+
+  # fail_push_from_call(dir_suffix, n): push() calls against this clone's
+  # directory succeed until the n-th call (1-indexed), which and all
+  # subsequent calls fail. Lets a test target persist_statuses' push
+  # specifically without also failing an earlier push (e.g. the initial
+  # manifest commit) that shares the same dir and refspec.
+  def fail_push_from_call(dir_suffix, n)
+    @push_fail_from_call[dir_suffix] = n
   end
 
   # The next `n` push() calls with this exact `refspec` fail, then succeed.
@@ -260,11 +271,34 @@ class FakeGithub
       return false
     end
 
+    @push_call_count[suffix(dir)] += 1
+    from_call = @push_fail_from_call[suffix(dir)]
+    return false if from_call && @push_call_count[suffix(dir)] >= from_call
+
     true
   end
 
   def set_remote_url(dir, url)
     record(:set_remote_url, [dir, url])
+  end
+
+  # reset_hard: best-effort recovery from a failed persist push — resets
+  # @releases_dir back to `ref` so a stranded local commit can't wedge the
+  # next run's guard_synced_checkout.
+  def reset_hard(dir, ref)
+    record(:reset_hard, [dir, ref])
+    if (@reset_hard_failures ||= {})[suffix(dir)]
+      raise ::Train::Github::CommandError.new(
+        ["git", "reset", "--hard", ref], stdout: "", stderr: @reset_hard_failures[suffix(dir)], status: fake_failed_status
+      )
+    end
+  end
+
+  # fail_reset_hard: the next reset_hard(dir, ...) call for this clone's
+  # directory basename raises Train::Github::CommandError instead of
+  # resetting — simulates reset_hard itself failing.
+  def fail_reset_hard(dir_suffix, message: "simulated reset failure")
+    (@reset_hard_failures ||= {})[dir_suffix] = message
   end
 
   def pr_create(repo:, base:, head:, title:, body:)

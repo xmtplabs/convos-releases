@@ -56,7 +56,11 @@ module Train
 
     def lint_one(name, mode, markdown)
       return "#{name}: still contains the seeded placeholder" if markdown.include?(Notes::HOTFIX_PLACEHOLDER)
-      return "#{name}: still contains the seeded placeholder" if markdown.include?(Notes::REVIEWER_PLACEHOLDER)
+      # Markup-independent: an AI draft can reproduce the reviewer sentence
+      # without its _.._ emphasis, so match the core phrase against the text
+      # with `_`/`*` emphasis markers stripped, not the raw seeded string.
+      unmarked = markdown.delete("_*")
+      return "#{name}: still contains the seeded placeholder" if unmarked.include?(Notes::REVIEWER_PLACEHOLDER_PHRASE)
 
       rendered = render(mode, markdown)
       return "#{name}: renders to empty store text" if rendered.strip.empty?

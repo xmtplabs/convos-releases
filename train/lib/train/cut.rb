@@ -353,9 +353,22 @@ module Train
       @gh.add(@releases_dir, mdir)
       @gh.commit(@releases_dir, "train: #{version} repo statuses")
       ok = @gh.push(@releases_dir, "HEAD:main")
-      loud_warning("status push failed; manifest remains pending") unless ok
+      reset_stranded_checkout unless ok
     rescue Github::CommandError, Github::ApiError => e
       loud_warning("status/anchor persist failed: #{e.message}")
+    end
+
+    # A failed push leaves @releases_dir sitting one commit ahead of
+    # origin/main — left alone, the NEXT run's guard_synced_checkout would
+    # hard-fail until a human resets it. Remote main is the source of truth,
+    # so reset the local checkout back to it; the reset itself is
+    # best-effort (a failure here is still just a warning, not a Failure).
+    def reset_stranded_checkout
+      loud_warning("status push failed; manifest remains pending")
+      remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
+      @gh.reset_hard(@releases_dir, remote) unless remote.empty?
+    rescue Github::CommandError, Github::ApiError => e
+      loud_warning("stranded-checkout reset failed: #{e.message}")
     end
 
     def seed_notes(repo, since)
