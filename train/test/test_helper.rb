@@ -6,6 +6,11 @@ ENV.delete("SLACK_WEBHOOK_URL")
 ENV.delete("SLACK_BOT_TOKEN")
 ENV.delete("SLACK_CHANNEL_APP")
 
+# Prevent accidental AI notes hook requests.
+ENV.delete("OS_HOOK_URL")
+ENV.delete("OS_HOOK_CLIENT_ID")
+ENV.delete("OS_HOOK_CLIENT_SECRET")
+
 # The nix sandbox runs under a US-ASCII locale; the store-notes bullets
 # are UTF-8 — match what real runners use.
 Encoding.default_external = Encoding::UTF_8

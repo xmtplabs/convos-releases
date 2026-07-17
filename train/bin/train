@@ -191,6 +191,26 @@ def cmd_seed_notes(argv)
   puts Train::Notes.format(prs)
 end
 
+def cmd_ai_notes(argv)
+  opts = { version: nil, channel: nil, thread_ts: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train ai-notes --version X.Y.Z [--channel C --thread-ts TS]"
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--channel CHANNEL") { |v| opts[:channel] = v }
+    o.on("--thread-ts TS") { |v| opts[:thread_ts] = v }
+  end.parse!(argv)
+
+  fail_loud("ai-notes: --version is required") unless opts[:version]
+  fail_loud("ai-notes: bad version '#{opts[:version]}'") unless Train::Versions.valid?(opts[:version])
+  if opts[:channel].nil? ^ opts[:thread_ts].nil?
+    fail_loud("ai-notes: --channel and --thread-ts go together")
+  end
+
+  slack = opts[:channel] && { channel: opts[:channel], ts: opts[:thread_ts] }
+  ok = Train::AiNotes.new.request(version: opts[:version], slack: slack)
+  fail_loud("ai-notes: request failed (see warnings above)") unless ok
+end
+
 def cmd_bump_version(argv)
   mode = argv.shift
   dir = argv.shift
@@ -254,6 +274,7 @@ COMMANDS = {
   "promote" => method(:cmd_promote),
   "merge" => method(:cmd_merge),
   "seed-notes" => method(:cmd_seed_notes),
+  "ai-notes" => method(:cmd_ai_notes),
   "bump-version" => method(:cmd_bump_version),
   "status" => method(:cmd_status)
 }.freeze
@@ -262,7 +283,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|bump-version|status) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|bump-version|status) ..."
   exit 1
 end
 
