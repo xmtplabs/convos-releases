@@ -579,4 +579,41 @@ class CutTest < Minitest::Test
     releases_pushes = @gh.calls_for(:push).select { |c| c.args.first == @releases_dir }
     assert releases_pushes.any?, "expected persist_statuses to push the manifest commit"
   end
+
+  def test_status_persist_failure_after_a_completed_cut_does_not_fail_the_run
+    # persist_statuses' git add/commit can raise (e.g. a local git error).
+    # That must not turn an otherwise-completed cut into a Failure — the
+    # cut itself (branches pushed, PRs created, Slack announced) already
+    # happened; losing the status/anchor commit is a warn-only best effort.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_commit(message: "simulated local commit failure")
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status\/anchor persist failed/i, @err.string)
+  end
+
+  def test_ai_notes_request_fires_even_when_status_persist_raises
+    # The AI-notes hand-off must not be skipped just because the best-effort
+    # status/anchor commit blew up — the anchor write into the manifest
+    # object already happened in memory before persist_statuses runs.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_commit(message: "simulated local commit failure")
+    ai = FakeAiNotes.new
+
+    result = new_cut(ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_equal [{ version: "2.1.0", slack: { channel: "C0APP", ts: "1700000000.000100" } }], ai.requests
+  end
 end

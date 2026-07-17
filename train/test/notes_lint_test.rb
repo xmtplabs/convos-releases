@@ -98,4 +98,22 @@ class NotesLintTest < Minitest::Test
       assert_match(/placeholder/, report[:errors].first)
     end
   end
+
+  def test_wrong_case_kind_is_an_error
+    with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "Release") do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/kind "Release" is not release or hotfix/, report[:errors].join("; "))
+    end
+  end
+
+  def test_absent_kind_is_an_error
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "manifest.yml"), "version: 1.0.0\n")
+      File.write(File.join(dir, "ios.md"), "- Just iOS this time\n")
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/kind nil is not release or hotfix/, report[:errors].join("; "))
+    end
+  end
 end

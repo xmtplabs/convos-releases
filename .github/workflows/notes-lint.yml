@@ -38,6 +38,14 @@ jobs:
             exit 1
           fi
           allowed="releases/$v/ios.md releases/$v/android.md releases/$v/submission-notes.md"
+          # Capture into a variable and check the exit status explicitly —
+          # feeding a failing `git diff` straight into the loop (pipe or
+          # process substitution) hides its exit code and yields an empty
+          # path list, so the security check would pass vacuously.
+          if ! changed=$(git diff --no-renames --name-only "origin/${BASE_REF}...HEAD"); then
+            echo "::error::git diff failed while computing ai-notes scope" >&2
+            exit 1
+          fi
           offenders=""
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -45,7 +53,7 @@ jobs:
               *" $f "*) ;;
               *) offenders="$offenders$f"$'\n' ;;
             esac
-          done < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          done <<< "$changed"
           if [ -n "$offenders" ]; then
             echo "::error::ai-notes/$v touches files outside its scope:"
             echo "$offenders"

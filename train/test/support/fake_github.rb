@@ -94,6 +94,15 @@ class FakeGithub
     (@pr_create_failures ||= {})[repo] = message
   end
 
+  # fail_commit: subsequent commit() calls whose message contains `match`
+  # raise Train::Github::CommandError instead of committing — simulates a
+  # git commit failure inside persist_statuses' best-effort status/anchor
+  # persist without disturbing unrelated commits (e.g. the initial manifest
+  # commit) that share the same fake.
+  def fail_commit(match: "repo statuses", message: "simulated commit failure")
+    @commit_failure = { match: match, message: message }
+  end
+
   # stub_release_exists: scripts release_exists?(repo, tag) to return true
   # — tests default to "absent" (false) unless a release is stubbed here.
   def stub_release_exists(repo, tag)
@@ -232,6 +241,12 @@ class FakeGithub
 
   def commit(dir, message, all: false)
     record(:commit, [dir, message], { all: all })
+    if @commit_failure && message.include?(@commit_failure[:match])
+      raise ::Train::Github::CommandError.new(
+        ["git", "commit", "-m", message], stdout: "", stderr: @commit_failure[:message], status: fake_failed_status
+      )
+    end
+
     true
   end
 

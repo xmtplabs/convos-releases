@@ -24,6 +24,11 @@ module Train
       return { checked: [], errors: ["no manifest.yml — not a release dir"] } unless File.exist?(mfile)
 
       kind = Manifest.read(mfile)["kind"]
+      # Strict whitelist: any kind other than these two (absent, misspelled,
+      # wrong case) is an error rather than silently falling through to
+      # hotfix's present-files-only leniency.
+      return { checked: [], errors: ["manifest kind #{kind.inspect} is not release or hotfix"] } unless %w[release hotfix].include?(kind)
+
       checked = []
       errors = []
 

@@ -74,13 +74,16 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
+        # Anchor durability comes BEFORE the ai_notes hand-off: the manifest
+        # object is updated in memory and (best-effort) persisted to disk
+        # first, so a later persist_statuses failure can never take down an
+        # otherwise-completed cut, and ai_notes.request always sees the
+        # thread whether or not the persist succeeded.
         thread = @notifier.post_cut(version: version, kind: "release")
         Manifest.set_announcement(mfile, **thread) if thread
+        persist_statuses(mdir, version)
         @ai_notes.request(version: version, slack: thread)
 
-        # Re-run persist_statuses (idempotent/dirty-gated) so the announcement
-        # anchor rides the same best-effort commit as the rest of this run.
-        persist_statuses(mdir, version)
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)
@@ -339,9 +342,11 @@ module Train
     # persist_statuses: best-effort; "pending" is the conservative truthful
     # state if this push loses a race. `run` calls this twice: once right
     # after ensure_all_repos (so a hard failure doesn't lose a partial
-    # success), and again at the very end (dirty?-gated, so a no-op unless
-    # set_announcement wrote a fresh thread anchor) so that anchor ships in
-    # the same best-effort commit rather than a separate push.
+    # success), and again after set_announcement (dirty?-gated, so a no-op
+    # unless that wrote a fresh thread anchor) so that anchor ships in the
+    # same best-effort commit rather than a separate push. The whole body is
+    # rescued — a raising add/commit must never fail an otherwise-completed
+    # cut; the anchor already lives in the in-memory manifest either way.
     def persist_statuses(mdir, version)
       return unless @gh.dirty?(@releases_dir, mdir)
 
@@ -349,6 +354,8 @@ module Train
       @gh.commit(@releases_dir, "train: #{version} repo statuses")
       ok = @gh.push(@releases_dir, "HEAD:main")
       loud_warning("status push failed; manifest remains pending") unless ok
+    rescue Github::CommandError, Github::ApiError => e
+      loud_warning("status/anchor persist failed: #{e.message}")
     end
 
     def seed_notes(repo, since)

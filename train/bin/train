@@ -214,16 +214,24 @@ end
 
 # Explicit --channel/--thread-ts always win; otherwise fall back to the
 # original cut's thread anchor (Cut#run writes it via Manifest.set_announcement)
-# so a manual re-fire replies in-thread instead of starting a new one.
+# so a manual re-fire replies in-thread instead of starting a new one. Only
+# trusted when BOTH fields are non-empty strings — a blank or malformed
+# anchor must not be handed to the AI-notes request as if it were real;
+# proceed anchor-less instead.
 def manifest_announcement(version)
   mfile = File.join(Dir.pwd, "releases", version, "manifest.yml")
   return nil unless File.exist?(mfile)
 
   announcement = Train::Manifest.read(mfile)["announcement"]
-  return nil unless announcement
+  channel = announcement && announcement["channel"]
+  ts = announcement && announcement["ts"]
+  unless channel.is_a?(String) && !channel.empty? && ts.is_a?(String) && !ts.empty?
+    puts "ai-notes: no usable thread anchor in manifest — proceeding without one"
+    return nil
+  end
 
   puts "ai-notes: using thread anchor from manifest"
-  { channel: announcement["channel"], ts: announcement["ts"] }
+  { channel: channel, ts: ts }
 end
 
 def cmd_bump_version(argv)
