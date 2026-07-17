@@ -3,6 +3,8 @@
 # A developer shell may carry a real webhook — tests must never post to
 # Slack, even where a default Train::Notify gets constructed.
 ENV.delete("SLACK_WEBHOOK_URL")
+ENV.delete("SLACK_BOT_TOKEN")
+ENV.delete("SLACK_CHANNEL_APP")
 
 # The nix sandbox runs under a US-ASCII locale; the store-notes bullets
 # are UTF-8 — match what real runners use.
