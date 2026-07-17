@@ -599,11 +599,12 @@ class CutTest < Minitest::Test
     assert_match(/status\/anchor persist failed/i, @err.string)
   end
 
-  def test_status_push_failure_resets_local_checkout_to_origin_main
+  def test_status_push_failure_fetches_then_resets_local_checkout_to_fetch_head
     # A failed persist push leaves @releases_dir one commit ahead of
     # origin/main. Left alone, the NEXT run's guard_synced_checkout would
-    # hard-fail forever until a human intervenes. reset_hard is the
-    # best-effort fix: origin/main stays the source of truth.
+    # hard-fail forever until a human intervenes. The recovery must fetch
+    # main first (the sha ls_remote reports may not exist locally after a
+    # non-fast-forward push) and then reset to FETCH_HEAD, in that order.
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
@@ -614,16 +615,26 @@ class CutTest < Minitest::Test
     # persist_statuses at all.
     @gh.fail_push_from_call(File.basename(@releases_dir), 2)
     # Matches rev_parse's default ("sha-<dir-suffix>") so the initial
-    # guard_synced_checkout passes; reset_hard is asserted against this sha.
+    # guard_synced_checkout passes.
     @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "sha-#{File.basename(@releases_dir)}")
 
     result = new_cut.run(force: true, date_override: EDT_THU)
 
     assert_equal Dry::Monads::Success(:cut), result
     assert_match(/status push failed/i, @err.string)
-    resets = @gh.calls_for(:reset_hard).select { |c| c.args.first == @releases_dir }
-    assert resets.any?, "expected reset_hard to be called against @releases_dir after the failed push"
-    assert_equal "sha-#{File.basename(@releases_dir)}", resets.last.args[1]
+
+    # persist_statuses runs (and can fail-push) twice per `run` — once after
+    # ensure_all_repos, once after set_announcement — so fetch/reset_hard
+    # pairs may repeat; each pair must still be fetch-then-reset, never the
+    # other order.
+    releases_calls = @gh.calls.select { |c| c.args.first == @releases_dir && %i[fetch reset_hard].include?(c.method) }
+    assert releases_calls.any?, "expected at least one fetch/reset_hard pair against @releases_dir"
+    releases_calls.each_slice(2) do |fetch_call, reset_call|
+      assert_equal :fetch, fetch_call.method, "fetch must happen before reset_hard"
+      assert_equal :reset_hard, reset_call.method
+      assert_equal "main", fetch_call.args[1]
+      assert_equal "FETCH_HEAD", reset_call.args[1]
+    end
   end
 
   def test_status_push_failure_reset_failure_is_still_only_a_warning

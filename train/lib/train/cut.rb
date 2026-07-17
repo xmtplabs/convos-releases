@@ -361,12 +361,18 @@ module Train
     # A failed push leaves @releases_dir sitting one commit ahead of
     # origin/main — left alone, the NEXT run's guard_synced_checkout would
     # hard-fail until a human resets it. Remote main is the source of truth,
-    # so reset the local checkout back to it; the reset itself is
+    # so fetch it and reset the local checkout to FETCH_HEAD: the push failed
+    # because origin advanced past what this clone pushed from, so the sha
+    # ls_remote reports may not exist locally yet — resetting straight to it
+    # would fail and leave the checkout wedged. The whole recovery is
     # best-effort (a failure here is still just a warning, not a Failure).
     def reset_stranded_checkout
       loud_warning("status push failed; manifest remains pending")
       remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
-      @gh.reset_hard(@releases_dir, remote) unless remote.empty?
+      return if remote.empty?
+
+      @gh.fetch(@releases_dir, "main")
+      @gh.reset_hard(@releases_dir, "FETCH_HEAD")
     rescue Github::CommandError, Github::ApiError => e
       loud_warning("stranded-checkout reset failed: #{e.message}")
     end

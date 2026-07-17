@@ -83,11 +83,14 @@ jobs:
           nix_conf: |
             experimental-features = nix-command flakes
 
+      - uses: nicknovitski/nix-develop@v1
+        if: steps.changed.outputs.versions != ''
+
       - name: Lint
         if: steps.changed.outputs.versions != ''
         env:
           VERSIONS: ${{ steps.changed.outputs.versions }}
         run: |
           for v in $VERSIONS; do
-            nix develop --command train notes-lint --version "$v"
+            train notes-lint --version "$v"
           done

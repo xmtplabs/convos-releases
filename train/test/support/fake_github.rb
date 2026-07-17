@@ -301,6 +301,24 @@ class FakeGithub
     (@reset_hard_failures ||= {})[dir_suffix] = message
   end
 
+  # fetch: best-effort recovery step before reset_hard — pulls `refspec`'s
+  # objects into the local clone so a subsequent reset to FETCH_HEAD can
+  # succeed even when ls_remote's reported sha isn't present locally yet.
+  def fetch(dir, refspec)
+    record(:fetch, [dir, refspec])
+    if (@fetch_failures ||= {})[suffix(dir)]
+      raise ::Train::Github::CommandError.new(
+        ["git", "fetch", "origin", refspec], stdout: "", stderr: @fetch_failures[suffix(dir)], status: fake_failed_status
+      )
+    end
+  end
+
+  # fail_fetch: the next fetch(dir, ...) call for this clone's directory
+  # basename raises Train::Github::CommandError instead of fetching.
+  def fail_fetch(dir_suffix, message: "simulated fetch failure")
+    (@fetch_failures ||= {})[dir_suffix] = message
+  end
+
   def pr_create(repo:, base:, head:, title:, body:)
     record(:pr_create, [], { repo: repo, base: base, head: head, title: title, body: body })
     if @pr_create_failures&.key?(repo)

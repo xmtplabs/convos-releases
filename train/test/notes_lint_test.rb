@@ -5,9 +5,14 @@ require_relative "test_helper"
 require "train/notes_lint"
 
 class NotesLintTest < Minitest::Test
-  def with_dir(files, kind: "hotfix")
+  def with_dir(files, kind: "hotfix", repos: nil)
     Dir.mktmpdir do |dir|
-      File.write(File.join(dir, "manifest.yml"), "kind: #{kind}\n")
+      manifest = +"kind: #{kind}\n"
+      if repos
+        manifest << "repos:\n"
+        repos.each { |r| manifest << "  #{r}: {}\n" }
+      end
+      File.write(File.join(dir, "manifest.yml"), manifest)
       files.each { |name, content| File.write(File.join(dir, name), content) }
       yield dir
     end
@@ -53,7 +58,9 @@ class NotesLintTest < Minitest::Test
     end
   end
 
-  def test_missing_files_are_skipped_not_errors_for_hotfix
+  def test_missing_files_are_skipped_not_errors_when_manifest_has_no_repos
+    # No `repos:` key in the manifest (e.g. a hand-built fixture) imposes no
+    # presence requirements — only whatever's on disk is checked.
     with_dir({ "ios.md" => "- Just iOS this time\n" }) do |dir|
       report = Train::NotesLint.check(dir)
 
@@ -88,6 +95,48 @@ class NotesLintTest < Minitest::Test
       report = Train::NotesLint.check(dir)
 
       assert_empty report[:errors]
+    end
+  end
+
+  def test_hotfix_single_platform_manifest_passes_with_just_its_own_file
+    files = { "android.md" => "- Just android this time\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+      assert_equal 1, report[:checked].length
+    end
+  end
+
+  def test_hotfix_missing_platform_file_is_an_error_even_with_submission_notes
+    files = { "submission-notes.md" => "See [test plan](https://example.com/plan).\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/android\.md/, report[:errors].join("; "))
+    end
+  end
+
+  def test_hotfix_ios_repo_requires_ios_and_submission_notes
+    files = { "ios.md" => "- iOS fix\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/submission-notes\.md/, report[:errors].join("; "))
+      refute_match(/ios\.md: missing/, report[:errors].join("; "))
+    end
+  end
+
+  def test_hotfix_ios_repo_with_both_required_files_passes
+    files = {
+      "ios.md" => "- iOS fix\n",
+      "submission-notes.md" => "See [test plan](https://example.com/plan).\n"
+    }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+      assert_equal 2, report[:checked].length
     end
   end
 
