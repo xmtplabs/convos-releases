@@ -34,7 +34,7 @@ class NotesLintTest < Minitest::Test
   end
 
   def test_android_over_play_limit_is_an_error
-    with_dir({ "android.md" => "- #{"x" * 600}\n" }) do |dir|
+    with_dir({ "android.md" => "- #{"x" * 600}\n" }, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_equal 1, report[:errors].length
@@ -43,7 +43,7 @@ class NotesLintTest < Minitest::Test
   end
 
   def test_seeded_hotfix_placeholder_is_an_error
-    with_dir({ "ios.md" => "- #{Train::Notes::HOTFIX_PLACEHOLDER}\n" }) do |dir|
+    with_dir({ "ios.md" => "- #{Train::Notes::HOTFIX_PLACEHOLDER}\n" }, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_match(/placeholder/, report[:errors].first)
@@ -51,26 +51,28 @@ class NotesLintTest < Minitest::Test
   end
 
   def test_notes_rendering_to_empty_store_text_is_an_error
-    with_dir({ "ios.md" => "<!-- only a comment -->\n" }) do |dir|
+    with_dir({ "ios.md" => "<!-- only a comment -->\n" }, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_match(/renders to empty/, report[:errors].first)
     end
   end
 
-  def test_missing_files_are_skipped_not_errors_when_manifest_has_no_repos
-    # No `repos:` key in the manifest (e.g. a hand-built fixture) imposes no
-    # presence requirements — only whatever's on disk is checked.
-    with_dir({ "ios.md" => "- Just iOS this time\n" }) do |dir|
+  def test_hotfix_manifest_with_absent_repos_key_is_malformed
+    # No `repos:` key in the manifest (e.g. a hand-built fixture) is not a
+    # state the train ever legitimately produces — every hotfix cut writes
+    # at least one repo entry — so this is rejected explicitly rather than
+    # silently skipping presence requirements.
+    with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "hotfix") do |dir|
       report = Train::NotesLint.check(dir)
 
-      assert_empty report[:errors]
-      assert_equal 1, report[:checked].length
+      assert_equal ["manifest has no repos — malformed hotfix manifest"], report[:errors]
+      assert_empty report[:checked]
     end
   end
 
   def test_symlinked_note_file_is_an_error_naming_the_file
-    with_dir({ "android.md" => "- Just android this time\n" }) do |dir|
+    with_dir({ "android.md" => "- Just android this time\n" }, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
       target = File.join(dir, "real.md")
       File.write(target, "- Just iOS this time\n")
       link = File.join(dir, "ios.md")
@@ -100,14 +102,6 @@ class NotesLintTest < Minitest::Test
       report = Train::NotesLint.check(dir)
 
       assert_match(/android\.md/, report[:errors].join("; "))
-    end
-  end
-
-  def test_hotfix_kind_single_file_is_ok
-    with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "hotfix") do |dir|
-      report = Train::NotesLint.check(dir)
-
-      assert_empty report[:errors]
     end
   end
 
@@ -153,8 +147,21 @@ class NotesLintTest < Minitest::Test
     end
   end
 
+  def test_hotfix_manifest_with_empty_repos_map_is_malformed
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "manifest.yml"), "kind: hotfix\nrepos: {}\n")
+      File.write(File.join(dir, "ios.md"), "- Just iOS this time\n")
+
+      report = Train::NotesLint.check(dir)
+
+      assert_equal ["manifest has no repos — malformed hotfix manifest"], report[:errors]
+      assert_empty report[:checked]
+    end
+  end
+
   def test_seeded_reviewer_placeholder_is_an_error
-    with_dir({ "submission-notes.md" => "#{Train::Notes::REVIEWER_PLACEHOLDER}\n" }) do |dir|
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "#{Train::Notes::REVIEWER_PLACEHOLDER}\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_match(/placeholder/, report[:errors].first)
@@ -165,7 +172,8 @@ class NotesLintTest < Minitest::Test
     # An AI draft can reproduce the seeded sentence without the surrounding
     # _.._ emphasis markup; the lint must catch it on the core phrase alone.
     stripped = Train::Notes::REVIEWER_PLACEHOLDER.delete("_")
-    with_dir({ "submission-notes.md" => "#{stripped}\n" }) do |dir|
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "#{stripped}\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_match(/placeholder/, report[:errors].first)
@@ -173,7 +181,8 @@ class NotesLintTest < Minitest::Test
   end
 
   def test_ordinary_mention_of_app_reviewers_in_a_different_sentence_passes
-    with_dir({ "submission-notes.md" => "Note for app reviewers: nothing new to test here.\n" }) do |dir|
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "Note for app reviewers: nothing new to test here.\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
       report = Train::NotesLint.check(dir)
 
       assert_empty report[:errors]

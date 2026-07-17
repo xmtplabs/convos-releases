@@ -32,6 +32,10 @@ module Train
       # hotfix's present-files-only leniency.
       return { checked: [], errors: ["manifest kind #{kind.inspect} is not release or hotfix"] } unless %w[release hotfix].include?(kind)
 
+      if kind == "hotfix" && (manifest["repos"] || {}).empty?
+        return { checked: [], errors: ["manifest has no repos — malformed hotfix manifest"] }
+      end
+
       required = kind == "release" ? RENDERS.keys : required_for_hotfix(manifest)
 
       checked = []
@@ -69,7 +73,8 @@ module Train
     # happens to be on disk: each present repo's platform notes file
     # (convos-ios -> ios.md, everything else -> android.md, matching
     # Promote::PLATFORMS), plus submission-notes.md whenever a convos-ios repo
-    # is present. A manifest with no repos yet imposes no requirements.
+    # is present. `check` rejects a repos-less hotfix manifest before this
+    # runs, so `repos` here is always non-empty.
     def required_for_hotfix(manifest)
       repos = (manifest["repos"] || {}).keys
       files = repos.map { |repo| repo.end_with?("convos-ios") ? "ios.md" : "android.md" }
