@@ -7,6 +7,7 @@ require "dry/monads"
 require "train/cut"
 require_relative "support/fake_github"
 require_relative "support/fake_notifier"
+require_relative "support/fake_ai_notes"
 
 class CutTest < Minitest::Test
   EDT_THU = "2026-07-16" # forces the slot decision to "go" without needing --force
@@ -50,8 +51,9 @@ class CutTest < Minitest::Test
     )
   end
 
-  def new_cut(gh = @gh, notifier: nil)
-    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err, notifier: notifier || FakeNotifier.new)
+  def new_cut(gh = @gh, notifier: nil, ai_notes: nil)
+    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err,
+                   notifier: notifier || FakeNotifier.new, ai_notes: ai_notes || FakeAiNotes.new)
   end
 
   def test_successful_cut_announces_in_slack
@@ -72,6 +74,26 @@ class CutTest < Minitest::Test
 
     assert_equal Dry::Monads::Success(:dry_run), result
     assert_empty notifier.cuts, "a dry-run must not announce a cut"
+  end
+
+  def test_cut_requests_ai_draft_with_the_thread_anchor
+    ai = FakeAiNotes.new
+
+    result = new_cut(ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert result.success?
+    assert_equal [{ version: "2.1.0", slack: { channel: "C0APP", ts: "1700000000.000100" } }], ai.requests
+  end
+
+  def test_dry_run_does_not_request_ai_draft
+    ai = FakeAiNotes.new
+    gh = FakeGithub.new(dry_run: true)
+    stub_clones_on(gh, version: "2.1.0")
+
+    result = new_cut(gh, ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert result.success?
+    assert_empty ai.requests, "a dry-run must not request an AI draft"
   end
 
   def test_unsynced_releases_checkout_is_refused_before_any_mutation

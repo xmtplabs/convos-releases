@@ -9,6 +9,7 @@ require_relative "config"
 require_relative "notify"
 require_relative "notes"
 require_relative "github"
+require_relative "ai_notes"
 
 module Train
   # The weekly release-branch cut. Runs FROM a checkout of convos-releases
@@ -22,12 +23,13 @@ module Train
 
     REPOS = %w[xmtplabs/convos-ios xmtplabs/convos-client].freeze
 
-    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil)
+    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil, ai_notes: nil)
       @gh = github
       @releases_dir = releases_dir
       @out = out
       @err = err
       @notifier = notifier || Notify.new(out: out, err: err)
+      @ai_notes = ai_notes || AiNotes.new(out: out, err: err)
     end
 
     # run: Success(:skipped | :dry_run | :cut) or Failure(message).
@@ -72,7 +74,8 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
-        @notifier.post_cut(version: version, kind: "release")
+        thread = @notifier.post_cut(version: version, kind: "release")
+        @ai_notes.request(version: version, slack: thread)
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)
