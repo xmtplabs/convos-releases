@@ -25,8 +25,16 @@ jobs:
       - name: Changed release versions
         id: changed
         run: |
-          versions=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- 'releases/' \
-            | cut -d/ -f2 | sort -u | tr '\n' ' ')
+          # Keep additions and deletions in the diff (deleting one notes file
+          # should still re-lint the version's remaining files), but drop any
+          # entry whose release dir no longer exists — a whole-version deletion
+          # or a loose file directly under releases/ is not a lintable version.
+          changed=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- 'releases/' | cut -d/ -f2 | sort -u)
+          versions=""
+          for v in $changed; do
+            [ -d "releases/$v" ] || continue
+            versions="$versions$v "
+          done
           echo "versions=${versions}" >> "$GITHUB_OUTPUT"
           echo "Changed versions: ${versions:-none}"
 
