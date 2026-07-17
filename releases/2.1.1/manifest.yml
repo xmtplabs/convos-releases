@@ -1,10 +1,10 @@
 version: 2.1.1
 kind: hotfix
 cut-date: '2026-07-17'
-status: cut
+status: branched
 repos:
   xmtplabs/convos-client:
     source-sha: 7ee979b471cbd92ae934b30d99f7a1549dbb02b6
     release-branch: hotfix/2.1.1
-    status: pending
+    status: branched
     rc: []
