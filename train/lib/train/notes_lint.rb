@@ -44,6 +44,11 @@ module Train
           next
         end
 
+        if File.symlink?(path)
+          errors << "#{name} is a symlink — refusing"
+          next
+        end
+
         markdown = File.read(path, encoding: Encoding::UTF_8)
         error = lint_one(name, mode, markdown)
         if error

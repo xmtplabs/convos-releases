@@ -51,8 +51,16 @@ jobs:
             [ -z "$f" ] && continue
             case " $allowed " in
               *" $f "*) ;;
-              *) offenders="$offenders$f"$'\n' ;;
+              *) offenders="$offenders$f"$'\n'; continue ;;
             esac
+            # A symlinked note file would let downstream File.read follow it
+            # to arbitrary runner-local content while the pathname itself
+            # still matches the allowlist, so fail closed on anything that
+            # isn't a plain regular file in the checkout.
+            if [ -L "$f" ] || [ ! -f "$f" ]; then
+              echo "::error::$f is not a regular file (symlink or special file)" >&2
+              exit 1
+            fi
           done <<< "$changed"
           if [ -n "$offenders" ]; then
             echo "::error::ai-notes/$v touches files outside its scope:"

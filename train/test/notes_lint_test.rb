@@ -69,6 +69,19 @@ class NotesLintTest < Minitest::Test
     end
   end
 
+  def test_symlinked_note_file_is_an_error_naming_the_file
+    with_dir({ "android.md" => "- Just android this time\n" }) do |dir|
+      target = File.join(dir, "real.md")
+      File.write(target, "- Just iOS this time\n")
+      link = File.join(dir, "ios.md")
+      File.symlink(target, link)
+
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/ios\.md is a symlink/, report[:errors].join("; "))
+    end
+  end
+
   def test_no_manifest_is_an_error
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "ios.md"), "- Something\n")
