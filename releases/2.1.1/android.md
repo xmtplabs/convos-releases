@@ -1,3 +1,3 @@
-# Hotfix from v2.1.0
+In this Convos update:
 
-_Describe the fix being shipped; this file becomes the store release notes._
++ UI improvements when setting your profile
