@@ -73,8 +73,10 @@ those notes.
 - **No draft arrived** (no thread reply within ~15 min) — re-fire it:
   `nix develop --command train ai-notes --version X.Y.Z` (from a
   convos-releases checkout; needs OS_HOOK_URL/OS_HOOK_CLIENT_ID/
-  OS_HOOK_CLIENT_SECRET). Or just pencil-edit by hand — the seeded notes are
-  always the fallback.
+  OS_HOOK_CLIENT_SECRET). The thread anchor is stored in the manifest
+  (`releases/X.Y.Z/manifest.yml`), so this re-fires INTO the original Slack
+  thread automatically — no need to pass `--channel`/`--thread-ts` by hand.
+  Or just pencil-edit by hand — the seeded notes are always the fallback.
 - **Draft PR stuck open** (lint failed or conflicted) — fix or close it;
   whatever is on main at promote time ships.
 - **Rotation** — the hook auth is a Cloudflare Access service token

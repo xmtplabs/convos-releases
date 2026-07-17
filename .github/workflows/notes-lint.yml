@@ -22,6 +22,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Scope ai-notes PRs to one version's three note files
+        if: startsWith(github.head_ref, 'ai-notes/')
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # ai-notes/<version> is the only branch prefix armed for auto-merge
+          # (see RUNBOOK.md "AI-drafted release notes"), so a compromised or
+          # buggy draft PR must not be able to touch anything outside its own
+          # version's three note files.
+          v="${HEAD_REF#ai-notes/}"
+          if ! [[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::ai-notes branch has a non-semver version: '$v'" >&2
+            exit 1
+          fi
+          allowed="releases/$v/ios.md releases/$v/android.md releases/$v/submission-notes.md"
+          offenders=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case " $allowed " in
+              *" $f "*) ;;
+              *) offenders="$offenders$f"$'\n' ;;
+            esac
+          done < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          if [ -n "$offenders" ]; then
+            echo "::error::ai-notes/$v touches files outside its scope:"
+            echo "$offenders"
+            exit 1
+          fi
+
       - name: Changed release versions
         id: changed
         run: |

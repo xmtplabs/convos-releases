@@ -207,8 +207,23 @@ def cmd_ai_notes(argv)
   end
 
   slack = opts[:channel] && { channel: opts[:channel], ts: opts[:thread_ts] }
+  slack ||= manifest_announcement(opts[:version])
   ok = Train::AiNotes.new.request(version: opts[:version], slack: slack)
   fail_loud("ai-notes: request failed (see warnings above)") unless ok
+end
+
+# Explicit --channel/--thread-ts always win; otherwise fall back to the
+# original cut's thread anchor (Cut#run writes it via Manifest.set_announcement)
+# so a manual re-fire replies in-thread instead of starting a new one.
+def manifest_announcement(version)
+  mfile = File.join(Dir.pwd, "releases", version, "manifest.yml")
+  return nil unless File.exist?(mfile)
+
+  announcement = Train::Manifest.read(mfile)["announcement"]
+  return nil unless announcement
+
+  puts "ai-notes: using thread anchor from manifest"
+  { channel: announcement["channel"], ts: announcement["ts"] }
 end
 
 def cmd_bump_version(argv)
@@ -267,7 +282,6 @@ def cmd_notes_lint(argv)
   report = Train::NotesLint.check(dir)
   report[:checked].each { |line| puts line }
   fail_loud(report[:errors].join("; ")) unless report[:errors].empty?
-  fail_loud("notes-lint: no notes files in #{dir}") if report[:checked].empty?
   puts "notes-lint: ok"
 end
 

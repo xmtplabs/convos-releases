@@ -75,7 +75,12 @@ module Train
         yield result
 
         thread = @notifier.post_cut(version: version, kind: "release")
+        Manifest.set_announcement(mfile, **thread) if thread
         @ai_notes.request(version: version, slack: thread)
+
+        # Re-run persist_statuses (idempotent/dirty-gated) so the announcement
+        # anchor rides the same best-effort commit as the rest of this run.
+        persist_statuses(mdir, version)
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)
@@ -208,7 +213,7 @@ module Train
       android_notes = seed_notes("xmtplabs/convos-client", since)
       File.write(File.join(mdir, "android.md"), android_notes)
       submission = +"# Submission notes for #{version}\n\n"
-      submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n\n"
+      submission << "#{Notes::REVIEWER_PLACEHOLDER}\n\n"
       submission << android_notes
       File.write(File.join(mdir, "submission-notes.md"), submission)
     end
@@ -332,7 +337,11 @@ module Train
     end
 
     # persist_statuses: best-effort; "pending" is the conservative truthful
-    # state if this push loses a race.
+    # state if this push loses a race. `run` calls this twice: once right
+    # after ensure_all_repos (so a hard failure doesn't lose a partial
+    # success), and again at the very end (dirty?-gated, so a no-op unless
+    # set_announcement wrote a fresh thread anchor) so that anchor ships in
+    # the same best-effort commit rather than a separate push.
     def persist_statuses(mdir, version)
       return unless @gh.dirty?(@releases_dir, mdir)
 

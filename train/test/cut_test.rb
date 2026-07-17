@@ -65,6 +65,15 @@ class CutTest < Minitest::Test
     assert_equal [{ version: "2.1.0", kind: "release" }], notifier.cuts
   end
 
+  def test_successful_cut_stores_the_thread_anchor_in_the_manifest
+    result = new_cut(notifier: FakeNotifier.new).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    mfile = File.join(@releases_dir, "releases", "2.1.0", "manifest.yml")
+    data = Train::Manifest.read(mfile)
+    assert_equal({ "channel" => "C0APP", "ts" => "1700000000.000100" }, data["announcement"])
+  end
+
   def test_dry_run_does_not_announce
     gh = FakeGithub.new(dry_run: true)
     stub_clones_on(gh, version: "2.1.0")
