@@ -125,6 +125,16 @@ module Train
       true
     end
 
+    # Durable Slack thread anchor: ai-notes re-fires (see RUNBOOK.md) read this
+    # block to reply in the ORIGINAL thread instead of starting a new one.
+    # Always overwrites — the latest cut announcement is the one that matters.
+    def set_announcement(file, channel:, ts:)
+      data = read(file)
+      data["announcement"] = { "channel" => channel, "ts" => ts }
+      write(file, data)
+      data
+    end
+
     def read(file)
       # permitted_classes: [Date] — an unquoted hand-edited cut-date parses as
       # a native YAML date; normalize back to the ISO string the tool compares.

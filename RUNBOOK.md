@@ -20,6 +20,7 @@ store steps — App Store Connect / Play Console access.
 **Contents**
 
 - [The normal week (no action required)](#the-normal-week-no-action-required)
+- [AI-drafted release notes (ConvosOS)](#ai-drafted-release-notes-convosos)
 - [Merging the train](#merging-the-train)
 - [Promotion (automatic; how to re-run)](#promotion-automatic-how-to-re-run)
 - [Hotfix: patching an already-released version](#hotfix-patching-an-already-released-version)
@@ -56,6 +57,32 @@ store steps — App Store Connect / Play Console access.
    App Store Connect "Submit for Review". That's the only manual step.
 7. Check state at any point: `train status x.y.z`, or read
    `releases/x.y.z/manifest.yml`.
+
+## AI-drafted release notes (ConvosOS)
+
+After every normal cut, the train asks ConvosOS to draft better release
+notes (`Train::AiNotes` → os-agent `/hooks/run`). ConvosOS reads the merged
+PRs and linked Linear issues in the cut range, then opens a PR on this repo
+(branch `ai-notes/<version>`) editing `releases/<version>/*.md`. The PR
+**auto-merges once the `notes-lint` check passes** and the link is posted as
+a reply in the cut's Slack thread. Hotfixes are excluded — the fixer writes
+those notes.
+
+- **Draft is wrong or overwrote your edits** — pencil-edit main as usual, or
+  revert the merge commit (the PR trail links it).
+- **No draft arrived** (no thread reply within ~15 min) — re-fire it:
+  `nix develop --command train ai-notes --version X.Y.Z` (from a
+  convos-releases checkout; needs OS_HOOK_URL/OS_HOOK_CLIENT_ID/
+  OS_HOOK_CLIENT_SECRET). The thread anchor is stored in the manifest
+  (`releases/X.Y.Z/manifest.yml`), so this re-fires INTO the original Slack
+  thread automatically — no need to pass `--channel`/`--thread-ts` by hand.
+  Or just pencil-edit by hand — the seeded notes are always the fallback.
+- **Draft PR stuck open** (lint failed or conflicted) — fix or close it;
+  whatever is on main at promote time ships.
+- **Rotation** — the hook auth is a Cloudflare Access service token
+  (OS_HOOK_CLIENT_ID/SECRET secrets here, token minted in the CF dashboard);
+  the announcement uses a Slack bot token (SLACK_BOT_TOKEN). Rotate either by
+  minting a new one and updating the repo secret.
 
 ## Merging the train
 
@@ -323,5 +350,5 @@ the manifest, not the calendar.
 | Play: `versionCode already used` | re-uploading a commit whose code was consumed | Push any new commit to the release branch (new timestamp → new code). |
 | `train X cut <old-date> is still status:cut` | an older train never completed or was never torn down | Finish it (re-dispatch reconciles) or abandon it per above. |
 | Scheduled cut didn't fire | wrong day/skip-date, or the cut-cron worker is down (Cloudflare logs; it pings #app on dispatch failure) | Check `release-config.yml` and workers/cut-cron; `train cut --force` (or Actions → Release Cut → Run workflow) to cut now. |
-| Cut succeeded but no #app announcement | `SLACK_WEBHOOK_APP` secret missing/rotated, or Slack outage (the cut run's log shows the skip note or warning) | Fix the secret for next time; announce manually — do NOT re-run a completed cut just for Slack. (not yet observed) |
+| Cut succeeded but no #app announcement | `SLACK_BOT_TOKEN` secret or `SLACK_CHANNEL_APP` var missing/rotated, bot not invited to #app, or Slack outage (the cut log shows "SLACK_BOT_TOKEN/SLACK_CHANNEL_APP not set — skipping" if config absent) | Fix the secret/var or invite the bot for next time; announce manually — do NOT re-run a completed cut just for Slack. |
 | Append step: `manifest append failed after 3 attempts` | push contention on convos-releases main | Re-run the failed workflow (append is idempotent), or run `train append-rc` manually. |

@@ -253,6 +253,25 @@ class ManifestTest < Minitest::Test
     assert_match(/already in manifest/, err.message)
   end
 
+  # ---- set_announcement ----
+
+  def test_set_announcement_writes_channel_and_ts
+    init_with_one_repo
+    Train::Manifest.set_announcement(file, channel: "C0APP", ts: "1700000000.000100")
+
+    data = Train::Manifest.read(file)
+    assert_equal({ "channel" => "C0APP", "ts" => "1700000000.000100" }, data["announcement"])
+  end
+
+  def test_set_announcement_overwrites_existing_block
+    init_with_one_repo
+    Train::Manifest.set_announcement(file, channel: "C0APP", ts: "1700000000.000100")
+    Train::Manifest.set_announcement(file, channel: "C0APP", ts: "1700000001.000200")
+
+    data = Train::Manifest.read(file)
+    assert_equal({ "channel" => "C0APP", "ts" => "1700000001.000200" }, data["announcement"])
+  end
+
   private
 
   def init_with_one_repo

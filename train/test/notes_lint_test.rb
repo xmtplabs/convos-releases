@@ -1,0 +1,209 @@
+# frozen_string_literal: true
+
+require "tmpdir"
+require_relative "test_helper"
+require "train/notes_lint"
+
+class NotesLintTest < Minitest::Test
+  def with_dir(files, kind: "hotfix", repos: nil)
+    Dir.mktmpdir do |dir|
+      manifest = +"kind: #{kind}\n"
+      if repos
+        manifest << "repos:\n"
+        repos.each { |r| manifest << "  #{r}: {}\n" }
+      end
+      File.write(File.join(dir, "manifest.yml"), manifest)
+      files.each { |name, content| File.write(File.join(dir, name), content) }
+      yield dir
+    end
+  end
+
+  def test_clean_notes_pass_and_report_rendered_lengths
+    files = {
+      "ios.md" => "## Features\n- Nice thing\n",
+      "android.md" => "## Fixes\n- Small fix\n",
+      "submission-notes.md" => "See [test plan](https://example.com/plan).\n"
+    }
+    with_dir(files, kind: "release") do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+      assert_equal 3, report[:checked].length
+      assert report[:checked].all? { |line| line.include?("chars rendered") }
+    end
+  end
+
+  def test_android_over_play_limit_is_an_error
+    with_dir({ "android.md" => "- #{"x" * 600}\n" }, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_equal 1, report[:errors].length
+      assert_match(/Play limit 500/, report[:errors].first)
+    end
+  end
+
+  def test_seeded_hotfix_placeholder_is_an_error
+    with_dir({ "ios.md" => "- #{Train::Notes::HOTFIX_PLACEHOLDER}\n" }, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/placeholder/, report[:errors].first)
+    end
+  end
+
+  def test_notes_rendering_to_empty_store_text_is_an_error
+    with_dir({ "ios.md" => "<!-- only a comment -->\n" }, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/renders to empty/, report[:errors].first)
+    end
+  end
+
+  def test_hotfix_manifest_with_absent_repos_key_is_malformed
+    # No `repos:` key in the manifest (e.g. a hand-built fixture) is not a
+    # state the train ever legitimately produces — every hotfix cut writes
+    # at least one repo entry — so this is rejected explicitly rather than
+    # silently skipping presence requirements.
+    with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "hotfix") do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_equal ["manifest has no repos — malformed hotfix manifest"], report[:errors]
+      assert_empty report[:checked]
+    end
+  end
+
+  def test_symlinked_note_file_is_an_error_naming_the_file
+    with_dir({ "android.md" => "- Just android this time\n" }, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      target = File.join(dir, "real.md")
+      File.write(target, "- Just iOS this time\n")
+      link = File.join(dir, "ios.md")
+      File.symlink(target, link)
+
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/ios\.md is a symlink/, report[:errors].join("; "))
+    end
+  end
+
+  def test_no_manifest_is_an_error
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "ios.md"), "- Something\n")
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/no manifest\.yml/, report[:errors].first)
+    end
+  end
+
+  def test_release_kind_missing_android_is_an_error_naming_the_file
+    files = {
+      "ios.md" => "## Features\n- Nice thing\n",
+      "submission-notes.md" => "See [test plan](https://example.com/plan).\n"
+    }
+    with_dir(files, kind: "release") do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/android\.md/, report[:errors].join("; "))
+    end
+  end
+
+  def test_hotfix_single_platform_manifest_passes_with_just_its_own_file
+    files = { "android.md" => "- Just android this time\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+      assert_equal 1, report[:checked].length
+    end
+  end
+
+  def test_hotfix_missing_platform_file_is_an_error_even_with_submission_notes
+    files = { "submission-notes.md" => "See [test plan](https://example.com/plan).\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-client"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/android\.md/, report[:errors].join("; "))
+    end
+  end
+
+  def test_hotfix_ios_repo_requires_ios_and_submission_notes
+    files = { "ios.md" => "- iOS fix\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/submission-notes\.md/, report[:errors].join("; "))
+      refute_match(/ios\.md: missing/, report[:errors].join("; "))
+    end
+  end
+
+  def test_hotfix_ios_repo_with_both_required_files_passes
+    files = {
+      "ios.md" => "- iOS fix\n",
+      "submission-notes.md" => "See [test plan](https://example.com/plan).\n"
+    }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+      assert_equal 2, report[:checked].length
+    end
+  end
+
+  def test_hotfix_manifest_with_empty_repos_map_is_malformed
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "manifest.yml"), "kind: hotfix\nrepos: {}\n")
+      File.write(File.join(dir, "ios.md"), "- Just iOS this time\n")
+
+      report = Train::NotesLint.check(dir)
+
+      assert_equal ["manifest has no repos — malformed hotfix manifest"], report[:errors]
+      assert_empty report[:checked]
+    end
+  end
+
+  def test_seeded_reviewer_placeholder_is_an_error
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "#{Train::Notes::REVIEWER_PLACEHOLDER}\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/placeholder/, report[:errors].first)
+    end
+  end
+
+  def test_reviewer_placeholder_without_markdown_emphasis_is_still_an_error
+    # An AI draft can reproduce the seeded sentence without the surrounding
+    # _.._ emphasis markup; the lint must catch it on the core phrase alone.
+    stripped = Train::Notes::REVIEWER_PLACEHOLDER.delete("_")
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "#{stripped}\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/placeholder/, report[:errors].first)
+    end
+  end
+
+  def test_ordinary_mention_of_app_reviewers_in_a_different_sentence_passes
+    files = { "ios.md" => "- Just iOS this time\n", "submission-notes.md" => "Note for app reviewers: nothing new to test here.\n" }
+    with_dir(files, kind: "hotfix", repos: ["xmtplabs/convos-ios"]) do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_empty report[:errors]
+    end
+  end
+
+  def test_wrong_case_kind_is_an_error
+    with_dir({ "ios.md" => "- Just iOS this time\n" }, kind: "Release") do |dir|
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/kind "Release" is not release or hotfix/, report[:errors].join("; "))
+    end
+  end
+
+  def test_absent_kind_is_an_error
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "manifest.yml"), "version: 1.0.0\n")
+      File.write(File.join(dir, "ios.md"), "- Just iOS this time\n")
+      report = Train::NotesLint.check(dir)
+
+      assert_match(/kind nil is not release or hotfix/, report[:errors].join("; "))
+    end
+  end
+end

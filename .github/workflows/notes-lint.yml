@@ -1,0 +1,104 @@
+# Required check for auto-merged notes PRs (ConvosOS drafts). Runs on EVERY
+# PR to main and no-ops fast when no releases/ files changed — a required
+# check gated by `on.paths` would never report and wedge unrelated PRs.
+name: Notes Lint
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: notes-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  notes-lint:
+    runs-on: warp-ubuntu-latest-x64-8x
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Scope ai-notes PRs to one version's three note files
+        if: startsWith(github.head_ref, 'ai-notes/')
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # ai-notes/<version> is the only branch prefix armed for auto-merge
+          # (see RUNBOOK.md "AI-drafted release notes"), so a compromised or
+          # buggy draft PR must not be able to touch anything outside its own
+          # version's three note files.
+          v="${HEAD_REF#ai-notes/}"
+          if ! [[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::ai-notes branch has a non-semver version: '$v'" >&2
+            exit 1
+          fi
+          allowed="releases/$v/ios.md releases/$v/android.md releases/$v/submission-notes.md"
+          # Capture into a variable and check the exit status explicitly —
+          # feeding a failing `git diff` straight into the loop (pipe or
+          # process substitution) hides its exit code and yields an empty
+          # path list, so the security check would pass vacuously.
+          if ! changed=$(git diff --no-renames --name-only "origin/${BASE_REF}...HEAD"); then
+            echo "::error::git diff failed while computing ai-notes scope" >&2
+            exit 1
+          fi
+          offenders=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case " $allowed " in
+              *" $f "*) ;;
+              *) offenders="$offenders$f"$'\n'; continue ;;
+            esac
+            # A symlinked note file would let downstream File.read follow it
+            # to arbitrary runner-local content while the pathname itself
+            # still matches the allowlist, so fail closed on anything that
+            # isn't a plain regular file in the checkout.
+            if [ -L "$f" ] || [ ! -f "$f" ]; then
+              echo "::error::$f is not a regular file (symlink or special file)" >&2
+              exit 1
+            fi
+          done <<< "$changed"
+          if [ -n "$offenders" ]; then
+            echo "::error::ai-notes/$v touches files outside its scope:"
+            echo "$offenders"
+            exit 1
+          fi
+
+      - name: Changed release versions
+        id: changed
+        run: |
+          # Keep additions and deletions in the diff (deleting one notes file
+          # should still re-lint the version's remaining files), but drop any
+          # entry whose release dir no longer exists — a whole-version deletion
+          # or a loose file directly under releases/ is not a lintable version.
+          changed=$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- 'releases/' | cut -d/ -f2 | sort -u)
+          versions=""
+          for v in $changed; do
+            [ -d "releases/$v" ] || continue
+            versions="$versions$v "
+          done
+          echo "versions=${versions}" >> "$GITHUB_OUTPUT"
+          echo "Changed versions: ${versions:-none}"
+
+      - name: Install Nix
+        if: steps.changed.outputs.versions != ''
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - uses: nicknovitski/nix-develop@v1
+        if: steps.changed.outputs.versions != ''
+
+      - name: Lint
+        if: steps.changed.outputs.versions != ''
+        env:
+          VERSIONS: ${{ steps.changed.outputs.versions }}
+        run: |
+          for v in $VERSIONS; do
+            train notes-lint --version "$v"
+          done

@@ -11,6 +11,16 @@ module Train
     # to stage notes that still contain it (the template must never ship).
     HOTFIX_PLACEHOLDER = "Describe the fix being shipped"
 
+    # Marker sentence Cut seeds into a weekly train's submission-notes.md;
+    # NotesLint refuses it too — an unedited reviewer seed must never ship.
+    REVIEWER_PLACEHOLDER = "_For app reviewers: summarize user-visible changes, test-account hints._"
+
+    # The core wording of REVIEWER_PLACEHOLDER, without its Markdown emphasis
+    # markup. An AI-drafted submission-notes.md can reproduce this sentence
+    # without the surrounding `_..._`, so NotesLint matches on this phrase
+    # against markup-stripped text rather than the raw seeded string alone.
+    REVIEWER_PLACEHOLDER_PHRASE = "For app reviewers: summarize user-visible changes"
+
     module_function
 
     # 7-day fallback when no --since / prior cut-date is available (the

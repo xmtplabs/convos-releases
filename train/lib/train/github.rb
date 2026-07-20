@@ -214,6 +214,25 @@ module Train
       run!(["git", "-C", dir, "checkout", "--quiet", "-B", branch, sha])
     end
 
+    # `git reset --hard ref` — forcibly resets `dir`'s checkout to `ref`,
+    # discarding any local commits/changes. Local-only (no push). Used to
+    # recover from a failed persist push: the local checkout would otherwise
+    # sit one commit ahead of origin, wedging the next run's
+    # guard_synced_checkout until a human resets it.
+    def reset_hard(dir, ref)
+      run!(["git", "-C", dir, "reset", "--hard", ref])
+    end
+
+    # `git fetch origin <refspec>` — pulls `refspec`'s objects into `dir`'s
+    # local object store (populating FETCH_HEAD) without touching the
+    # checkout. Like reset_hard, this only ever reads objects into the local
+    # clone, so it runs unconditionally rather than through mutate!. Used
+    # before reset_hard to recover from a non-fast-forward push: the remote
+    # sha ls_remote reports may not exist in this clone yet.
+    def fetch(dir, refspec)
+      run!(["git", "-C", dir, "fetch", "origin", refspec])
+    end
+
     # ---- mutating operations: no-op (but logged) under dry-run ----
 
     def git_config_bot(dir)

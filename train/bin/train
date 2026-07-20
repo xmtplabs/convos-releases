@@ -191,6 +191,49 @@ def cmd_seed_notes(argv)
   puts Train::Notes.format(prs)
 end
 
+def cmd_ai_notes(argv)
+  opts = { version: nil, channel: nil, thread_ts: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train ai-notes --version X.Y.Z [--channel C --thread-ts TS]"
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--channel CHANNEL") { |v| opts[:channel] = v }
+    o.on("--thread-ts TS") { |v| opts[:thread_ts] = v }
+  end.parse!(argv)
+
+  fail_loud("ai-notes: --version is required") unless opts[:version]
+  fail_loud("ai-notes: bad version '#{opts[:version]}'") unless Train::Versions.valid?(opts[:version])
+  if opts[:channel].nil? ^ opts[:thread_ts].nil?
+    fail_loud("ai-notes: --channel and --thread-ts go together")
+  end
+
+  slack = opts[:channel] && { channel: opts[:channel], ts: opts[:thread_ts] }
+  slack ||= manifest_announcement(opts[:version])
+  ok = Train::AiNotes.new.request(version: opts[:version], slack: slack)
+  fail_loud("ai-notes: request failed (see warnings above)") unless ok
+end
+
+# Explicit --channel/--thread-ts always win; otherwise fall back to the
+# original cut's thread anchor (Cut#run writes it via Manifest.set_announcement)
+# so a manual re-fire replies in-thread instead of starting a new one. Only
+# trusted when BOTH fields are non-empty strings — a blank or malformed
+# anchor must not be handed to the AI-notes request as if it were real;
+# proceed anchor-less instead.
+def manifest_announcement(version)
+  mfile = File.join(Dir.pwd, "releases", version, "manifest.yml")
+  return nil unless File.exist?(mfile)
+
+  announcement = Train::Manifest.read(mfile)["announcement"]
+  channel = announcement && announcement["channel"]
+  ts = announcement && announcement["ts"]
+  unless channel.is_a?(String) && !channel.empty? && ts.is_a?(String) && !ts.empty?
+    puts "ai-notes: no usable thread anchor in manifest — proceeding without one"
+    return nil
+  end
+
+  puts "ai-notes: using thread anchor from manifest"
+  { channel: channel, ts: ts }
+end
+
 def cmd_bump_version(argv)
   mode = argv.shift
   dir = argv.shift
@@ -231,6 +274,25 @@ def cmd_status(argv)
   end
 end
 
+def cmd_notes_lint(argv)
+  opts = { version: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train notes-lint --version X.Y.Z"
+    o.on("--version VERSION") { |v| opts[:version] = v }
+  end.parse!(argv)
+
+  fail_loud("notes-lint: --version is required") unless opts[:version]
+  fail_loud("notes-lint: bad version '#{opts[:version]}'") unless Train::Versions.valid?(opts[:version])
+
+  dir = File.join(Dir.pwd, "releases", opts[:version])
+  fail_loud("notes-lint: no release dir at #{dir}") unless Dir.exist?(dir)
+
+  report = Train::NotesLint.check(dir)
+  report[:checked].each { |line| puts line }
+  fail_loud(report[:errors].join("; ")) unless report[:errors].empty?
+  puts "notes-lint: ok"
+end
+
 def print_status(file)
   data = Train::Manifest.read(file)
   puts "#{data["version"]} (#{data["kind"]}) — cut #{data["cut-date"]} — status: #{data["status"]}"
@@ -254,7 +316,9 @@ COMMANDS = {
   "promote" => method(:cmd_promote),
   "merge" => method(:cmd_merge),
   "seed-notes" => method(:cmd_seed_notes),
+  "ai-notes" => method(:cmd_ai_notes),
   "bump-version" => method(:cmd_bump_version),
+  "notes-lint" => method(:cmd_notes_lint),
   "status" => method(:cmd_status)
 }.freeze
 
@@ -262,7 +326,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|bump-version|status) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|bump-version|notes-lint|status) ..."
   exit 1
 end
 

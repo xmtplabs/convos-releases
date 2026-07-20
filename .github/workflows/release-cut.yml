@@ -68,11 +68,17 @@ jobs:
       # A non-empty hotfix-base-tag switches this step to `train hotfix`
       # instead of `train cut` (hotfix is dispatch-only, no force flag).
       # A real cut announces itself in Slack (Train::Notify) — best-effort,
-      # and skipped with a note when SLACK_WEBHOOK_URL is unset.
+      # and skipped with a note when SLACK_BOT_TOKEN/SLACK_CHANNEL_APP are
+      # unset. A successful cut also asks ConvosOS for an AI notes draft
+      # (best-effort, Train::AiNotes).
       - name: Cut
         env:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_APP }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_APP: ${{ vars.SLACK_CHANNEL_APP }}
+          OS_HOOK_URL: ${{ vars.OS_HOOK_URL }}
+          OS_HOOK_CLIENT_ID: ${{ secrets.OS_HOOK_CLIENT_ID }}
+          OS_HOOK_CLIENT_SECRET: ${{ secrets.OS_HOOK_CLIENT_SECRET }}
           TRAIN_SCHEDULE: ${{ inputs.schedule || '' }}
           TRAIN_FORCE: ${{ inputs.force || 'false' }}
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}

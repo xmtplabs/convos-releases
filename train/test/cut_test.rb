@@ -7,6 +7,7 @@ require "dry/monads"
 require "train/cut"
 require_relative "support/fake_github"
 require_relative "support/fake_notifier"
+require_relative "support/fake_ai_notes"
 
 class CutTest < Minitest::Test
   EDT_THU = "2026-07-16" # forces the slot decision to "go" without needing --force
@@ -50,8 +51,9 @@ class CutTest < Minitest::Test
     )
   end
 
-  def new_cut(gh = @gh, notifier: nil)
-    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err, notifier: notifier || FakeNotifier.new)
+  def new_cut(gh = @gh, notifier: nil, ai_notes: nil)
+    Train::Cut.new(github: gh, releases_dir: @releases_dir, out: @out, err: @err,
+                   notifier: notifier || FakeNotifier.new, ai_notes: ai_notes || FakeAiNotes.new)
   end
 
   def test_successful_cut_announces_in_slack
@@ -63,6 +65,15 @@ class CutTest < Minitest::Test
     assert_equal [{ version: "2.1.0", kind: "release" }], notifier.cuts
   end
 
+  def test_successful_cut_stores_the_thread_anchor_in_the_manifest
+    result = new_cut(notifier: FakeNotifier.new).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    mfile = File.join(@releases_dir, "releases", "2.1.0", "manifest.yml")
+    data = Train::Manifest.read(mfile)
+    assert_equal({ "channel" => "C0APP", "ts" => "1700000000.000100" }, data["announcement"])
+  end
+
   def test_dry_run_does_not_announce
     gh = FakeGithub.new(dry_run: true)
     stub_clones_on(gh, version: "2.1.0")
@@ -72,6 +83,26 @@ class CutTest < Minitest::Test
 
     assert_equal Dry::Monads::Success(:dry_run), result
     assert_empty notifier.cuts, "a dry-run must not announce a cut"
+  end
+
+  def test_cut_requests_ai_draft_with_the_thread_anchor
+    ai = FakeAiNotes.new
+
+    result = new_cut(ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert result.success?
+    assert_equal [{ version: "2.1.0", slack: { channel: "C0APP", ts: "1700000000.000100" } }], ai.requests
+  end
+
+  def test_dry_run_does_not_request_ai_draft
+    ai = FakeAiNotes.new
+    gh = FakeGithub.new(dry_run: true)
+    stub_clones_on(gh, version: "2.1.0")
+
+    result = new_cut(gh, ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert result.success?
+    assert_empty ai.requests, "a dry-run must not request an AI draft"
   end
 
   def test_unsynced_releases_checkout_is_refused_before_any_mutation
@@ -547,5 +578,101 @@ class CutTest < Minitest::Test
            "expected a status-persisting commit against @releases_dir, got: #{@gh.calls_for(:commit).map(&:args)}"
     releases_pushes = @gh.calls_for(:push).select { |c| c.args.first == @releases_dir }
     assert releases_pushes.any?, "expected persist_statuses to push the manifest commit"
+  end
+
+  def test_status_persist_failure_after_a_completed_cut_does_not_fail_the_run
+    # persist_statuses' git add/commit can raise (e.g. a local git error).
+    # That must not turn an otherwise-completed cut into a Failure — the
+    # cut itself (branches pushed, PRs created, Slack announced) already
+    # happened; losing the status/anchor commit is a warn-only best effort.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_commit(message: "simulated local commit failure")
+
+    cut = new_cut
+    result = cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status\/anchor persist failed/i, @err.string)
+  end
+
+  def test_status_push_failure_fetches_then_resets_local_checkout_to_fetch_head
+    # A failed persist push leaves @releases_dir one commit ahead of
+    # origin/main. Left alone, the NEXT run's guard_synced_checkout would
+    # hard-fail forever until a human intervenes. The recovery must fetch
+    # main first (the sha ls_remote reports may not exist locally after a
+    # non-fast-forward push) and then reset to FETCH_HEAD, in that order.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    # Only the SECOND push against @releases_dir fails — the first is the
+    # initial manifest commit, which must succeed for the run to reach
+    # persist_statuses at all.
+    @gh.fail_push_from_call(File.basename(@releases_dir), 2)
+    # Matches rev_parse's default ("sha-<dir-suffix>") so the initial
+    # guard_synced_checkout passes.
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "sha-#{File.basename(@releases_dir)}")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status push failed/i, @err.string)
+
+    # persist_statuses runs (and can fail-push) twice per `run` — once after
+    # ensure_all_repos, once after set_announcement — so fetch/reset_hard
+    # pairs may repeat; each pair must still be fetch-then-reset, never the
+    # other order.
+    releases_calls = @gh.calls.select { |c| c.args.first == @releases_dir && %i[fetch reset_hard].include?(c.method) }
+    assert releases_calls.any?, "expected at least one fetch/reset_hard pair against @releases_dir"
+    releases_calls.each_slice(2) do |fetch_call, reset_call|
+      assert_equal :fetch, fetch_call.method, "fetch must happen before reset_hard"
+      assert_equal :reset_hard, reset_call.method
+      assert_equal "main", fetch_call.args[1]
+      assert_equal "FETCH_HEAD", reset_call.args[1]
+    end
+  end
+
+  def test_status_push_failure_reset_failure_is_still_only_a_warning
+    # reset_hard is itself best-effort — if it raises (e.g. the checkout is
+    # in a weird state), the cut must still be reported as a success; only a
+    # warning is logged.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_push_from_call(File.basename(@releases_dir), 2)
+    # Matches rev_parse's default ("sha-<dir-suffix>") so the initial
+    # guard_synced_checkout passes; reset_hard is asserted against this sha.
+    @gh.stub_ls_remote(File.basename(@releases_dir), "refs/heads/main", "sha-#{File.basename(@releases_dir)}")
+    @gh.fail_reset_hard(File.basename(@releases_dir), message: "simulated reset failure")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/status push failed/i, @err.string)
+  end
+
+  def test_ai_notes_request_fires_even_when_status_persist_raises
+    # The AI-notes hand-off must not be skipped just because the best-effort
+    # status/anchor commit blew up — the anchor write into the manifest
+    # object already happened in memory before persist_statuses runs.
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+    @gh.fail_commit(message: "simulated local commit failure")
+    ai = FakeAiNotes.new
+
+    result = new_cut(ai_notes: ai).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_equal [{ version: "2.1.0", slack: { channel: "C0APP", ts: "1700000000.000100" } }], ai.requests
   end
 end

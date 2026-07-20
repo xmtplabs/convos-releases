@@ -9,6 +9,7 @@ require_relative "config"
 require_relative "notify"
 require_relative "notes"
 require_relative "github"
+require_relative "ai_notes"
 
 module Train
   # The weekly release-branch cut. Runs FROM a checkout of convos-releases
@@ -22,12 +23,13 @@ module Train
 
     REPOS = %w[xmtplabs/convos-ios xmtplabs/convos-client].freeze
 
-    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil)
+    def initialize(github:, releases_dir: Dir.pwd, out: $stdout, err: $stderr, notifier: nil, ai_notes: nil)
       @gh = github
       @releases_dir = releases_dir
       @out = out
       @err = err
       @notifier = notifier || Notify.new(out: out, err: err)
+      @ai_notes = ai_notes || AiNotes.new(out: out, err: err)
     end
 
     # run: Success(:skipped | :dry_run | :cut) or Failure(message).
@@ -72,7 +74,16 @@ module Train
         persist_statuses(mdir, version)
         yield result
 
-        @notifier.post_cut(version: version, kind: "release")
+        # Anchor durability comes BEFORE the ai_notes hand-off: the manifest
+        # object is updated in memory and (best-effort) persisted to disk
+        # first, so a later persist_statuses failure can never take down an
+        # otherwise-completed cut, and ai_notes.request always sees the
+        # thread whether or not the persist succeeded.
+        thread = @notifier.post_cut(version: version, kind: "release")
+        Manifest.set_announcement(mfile, **thread) if thread
+        persist_statuses(mdir, version)
+        @ai_notes.request(version: version, slack: thread)
+
         Success(:cut)
       ensure
         FileUtils.remove_entry(work) if Dir.exist?(work)
@@ -205,7 +216,7 @@ module Train
       android_notes = seed_notes("xmtplabs/convos-client", since)
       File.write(File.join(mdir, "android.md"), android_notes)
       submission = +"# Submission notes for #{version}\n\n"
-      submission << "_For app reviewers: summarize user-visible changes, test-account hints._\n\n"
+      submission << "#{Notes::REVIEWER_PLACEHOLDER}\n\n"
       submission << android_notes
       File.write(File.join(mdir, "submission-notes.md"), submission)
     end
@@ -329,14 +340,41 @@ module Train
     end
 
     # persist_statuses: best-effort; "pending" is the conservative truthful
-    # state if this push loses a race.
+    # state if this push loses a race. `run` calls this twice: once right
+    # after ensure_all_repos (so a hard failure doesn't lose a partial
+    # success), and again after set_announcement (dirty?-gated, so a no-op
+    # unless that wrote a fresh thread anchor) so that anchor ships in the
+    # same best-effort commit rather than a separate push. The whole body is
+    # rescued — a raising add/commit must never fail an otherwise-completed
+    # cut; the anchor already lives in the in-memory manifest either way.
     def persist_statuses(mdir, version)
       return unless @gh.dirty?(@releases_dir, mdir)
 
       @gh.add(@releases_dir, mdir)
       @gh.commit(@releases_dir, "train: #{version} repo statuses")
       ok = @gh.push(@releases_dir, "HEAD:main")
-      loud_warning("status push failed; manifest remains pending") unless ok
+      reset_stranded_checkout unless ok
+    rescue Github::CommandError, Github::ApiError => e
+      loud_warning("status/anchor persist failed: #{e.message}")
+    end
+
+    # A failed push leaves @releases_dir sitting one commit ahead of
+    # origin/main — left alone, the NEXT run's guard_synced_checkout would
+    # hard-fail until a human resets it. Remote main is the source of truth,
+    # so fetch it and reset the local checkout to FETCH_HEAD: the push failed
+    # because origin advanced past what this clone pushed from, so the sha
+    # ls_remote reports may not exist locally yet — resetting straight to it
+    # would fail and leave the checkout wedged. The whole recovery is
+    # best-effort (a failure here is still just a warning, not a Failure).
+    def reset_stranded_checkout
+      loud_warning("status push failed; manifest remains pending")
+      remote = @gh.ls_remote(@releases_dir, "refs/heads/main")
+      return if remote.empty?
+
+      @gh.fetch(@releases_dir, "main")
+      @gh.reset_hard(@releases_dir, "FETCH_HEAD")
+    rescue Github::CommandError, Github::ApiError => e
+      loud_warning("stranded-checkout reset failed: #{e.message}")
     end
 
     def seed_notes(repo, since)
