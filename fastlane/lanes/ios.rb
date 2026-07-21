@@ -14,12 +14,23 @@ PR_SHARE_EXTENSION_BUNDLE_ID = "org.convos.ios-preview.pr.ShareExtension"
 
 # Prod (App Store, TestFlight) flavor. Built on every push to `dev`; talks
 # to the prod backend via config.prod.json. The Convos (Prod) scheme does not
-# build the App Clip target, so only the app + NSE bundle IDs are signed.
+# build the App Clip target, so the app, NSE, and ShareExtension bundle
+# ids are signed.
 PROD_SCHEME          = "Convos (Prod)"
 PROD_CONFIG          = "Release"
 PROD_BUNDLE_ID       = "org.convos.ios"
 PROD_NSE_BUNDLE_ID   = "org.convos.ios.ConvosNSE"
 PROD_SHARE_EXTENSION_BUNDLE_ID = "org.convos.ios.ShareExtension"
+
+# Dev (App Store, TestFlight) flavor. Ships to
+# the separate "Convos Dev" App Store Connect app. The Convos (Dev) scheme
+# archives only the app target (NSE + ShareExtension come in as implicit
+# dependencies; the App Clip is not part of the archive), so three bundle IDs.
+DEV_SCHEME          = "Convos (Dev)"
+DEV_CONFIG          = "Dev"
+DEV_BUNDLE_ID       = "org.convos.ios-preview"
+DEV_NSE_BUNDLE_ID   = "org.convos.ios-preview.ConvosNSE"
+DEV_SHARE_EXTENSION_BUNDLE_ID = "org.convos.ios-preview.ShareExtension"
 
 MATCH_GIT_URL    = ENV["MATCH_GIT_URL"] || "git@github.com:xmtplabs/convos-certificates.git"
 OUTPUT_DIR       = "build"

@@ -1,6 +1,32 @@
 platform :ios do
   desc "Build Convos (Prod) and upload to TestFlight internal groups"
   lane :testflight_prod do
+    build_and_upload_testflight(
+      scheme: PROD_SCHEME,
+      configuration: PROD_CONFIG,
+      app_bundle_id: PROD_BUNDLE_ID,
+      nse_bundle_id: PROD_NSE_BUNDLE_ID,
+      share_extension_bundle_id: PROD_SHARE_EXTENSION_BUNDLE_ID,
+      ipa_name: "Convos-Prod-TestFlight.ipa",
+    )
+  end
+
+  desc "Build Convos (Dev) and upload to TestFlight internal groups"
+  lane :testflight_dev do
+    build_and_upload_testflight(
+      scheme: DEV_SCHEME,
+      configuration: DEV_CONFIG,
+      app_bundle_id: DEV_BUNDLE_ID,
+      nse_bundle_id: DEV_NSE_BUNDLE_ID,
+      share_extension_bundle_id: DEV_SHARE_EXTENSION_BUNDLE_ID,
+      ipa_name: "Convos-Dev-TestFlight.ipa",
+    )
+  end
+
+  # Shared build-and-upload flow for the TestFlight flavors. Both flavors
+  # archive the same three targets (Convos, NotificationService,
+  # ShareExtension); only scheme, configuration, and bundle ids differ.
+  def build_and_upload_testflight(scheme:, configuration:, app_bundle_id:, nse_bundle_id:, share_extension_bundle_id:, ipa_name:)
     setup_ci if is_ci
     setup_app_store_connect_api_key
 
@@ -9,7 +35,7 @@ platform :ios do
     # and out-of-order pushes never collide with ASC's "must be greater" rule.
     git_count = `git rev-list --count HEAD`.strip.to_i
     latest_tf = latest_testflight_build_number(
-      app_identifier: PROD_BUNDLE_ID,
+      app_identifier: app_bundle_id,
       initial_build_number: 0,
     )
     build_number = [git_count, latest_tf + 1].max
@@ -31,7 +57,7 @@ platform :ios do
     match(
       type: "appstore",
       git_url: MATCH_GIT_URL,
-      app_identifier: [PROD_BUNDLE_ID, PROD_NSE_BUNDLE_ID, PROD_SHARE_EXTENSION_BUNDLE_ID],
+      app_identifier: [app_bundle_id, nse_bundle_id, share_extension_bundle_id],
       readonly: is_ci,
     )
 
@@ -41,21 +67,21 @@ platform :ios do
     # profile is regenerated. match publishes the real installed name per
     # bundle id in sigh_<id>_appstore_profile-name; read those and write them
     # into the Manual-signing build settings just before archiving.
-    app_profile = match_profile_name(PROD_BUNDLE_ID)
-    nse_profile = match_profile_name(PROD_NSE_BUNDLE_ID)
-    share_extension_profile = match_profile_name(PROD_SHARE_EXTENSION_BUNDLE_ID)
+    app_profile = match_profile_name(app_bundle_id)
+    nse_profile = match_profile_name(nse_bundle_id)
+    share_extension_profile = match_profile_name(share_extension_bundle_id)
 
-    apply_prod_signing("Convos", app_profile)
-    apply_prod_signing("NotificationService", nse_profile)
-    apply_prod_signing("ShareExtension", share_extension_profile)
+    apply_appstore_signing("Convos", app_profile, configuration)
+    apply_appstore_signing("NotificationService", nse_profile, configuration)
+    apply_appstore_signing("ShareExtension", share_extension_profile, configuration)
 
     build_app(
       project: PROJECT,
-      scheme: PROD_SCHEME,
-      configuration: PROD_CONFIG,
+      scheme: scheme,
+      configuration: configuration,
       export_method: "app-store",
       output_directory: OUTPUT_DIR,
-      output_name: "Convos-Prod-TestFlight.ipa",
+      output_name: ipa_name,
       clean: true,
       # gym's xcodeproj-based profile auto-detection can't resolve bundle IDs
       # defined via .xcconfig variables ($(CONVOS_BUNDLE_ID) etc.), so it maps
@@ -65,25 +91,25 @@ platform :ios do
       skip_profile_detection: true,
       export_options: {
         provisioningProfiles: {
-          PROD_BUNDLE_ID     => app_profile,
-          PROD_NSE_BUNDLE_ID => nse_profile,
-          PROD_SHARE_EXTENSION_BUNDLE_ID => share_extension_profile,
+          app_bundle_id     => app_profile,
+          nse_bundle_id     => nse_profile,
+          share_extension_bundle_id => share_extension_profile,
         },
       },
     )
 
-    # Internal-only distribution. All prod TestFlight groups (Convos iOS Team,
-    # Convos Team, Friends and Family, XMTP Labs Team) are internal, and Apple
-    # makes a build available to internal testers automatically once it finishes
-    # processing - you cannot (and need not) explicitly attach a build to an
-    # internal group. pilot's groups: option is for external distribution, so
-    # passing internal groups makes it call add_beta_groups and Apple rejects it
-    # ("Cannot add internal group to a build"). skip_submission uploads, waits
-    # for processing, and sets the changelog, but returns before the distribute
-    # step, so no group assignment or beta-review submission is attempted.
+    # Internal-only distribution. All TestFlight groups on both apps are
+    # internal, and Apple makes a build available to internal testers
+    # automatically once it finishes processing - you cannot (and need not)
+    # explicitly attach a build to an internal group. pilot's groups: option
+    # is for external distribution, so passing internal groups makes it call
+    # add_beta_groups and Apple rejects it ("Cannot add internal group to a
+    # build"). skip_submission uploads, waits for processing, and sets the
+    # changelog, but returns before the distribute step, so no group
+    # assignment or beta-review submission is attempted.
     upload_to_testflight(
-      ipa: File.join(OUTPUT_DIR, "Convos-Prod-TestFlight.ipa"),
-      app_identifier: PROD_BUNDLE_ID,
+      ipa: File.join(OUTPUT_DIR, ipa_name),
+      app_identifier: app_bundle_id,
       changelog: testflight_release_notes,
       skip_submission: true,
     )
@@ -177,16 +203,16 @@ platform :ios do
     name
   end
 
-  # Pin Manual AppStore signing on a target's Release configuration using the
+  # Pin Manual AppStore signing on a target's build configuration using the
   # exact profile name match resolved. Keeps the profile name out of the Xcode
   # project so a regenerated (possibly re-suffixed) profile never desyncs it.
-  # Bundle id and team are left to the Prod xcconfig; only the profile name and
-  # signing style need to be set here.
-  def apply_prod_signing(target, profile_name)
+  # Bundle id and team are left to the flavor's xcconfig; only the profile
+  # name and signing style need to be set here.
+  def apply_appstore_signing(target, profile_name, configuration)
     update_code_signing_settings(
       path: PROJECT,
       targets: [target],
-      build_configurations: [PROD_CONFIG],
+      build_configurations: [configuration],
       use_automatic_signing: false,
       code_sign_identity: "Apple Distribution",
       profile_name: profile_name,
