@@ -15,6 +15,10 @@ on:
         description: GitHub login requesting the merge (permission-gated)
         type: string
         required: true
+      requested-by:
+        description: "Operator identity (email/login) requesting the merge — log-only attribution"
+        type: string
+        default: ""
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -22,6 +26,20 @@ on:
         required: true
       RELEASES_BOT_PRIVATE_KEY:
         required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release (or hotfix) version (X.Y.Z) to merge
+        type: string
+        required: true
+      actor:
+        description: Dispatcher login — must equal github.actor (the dashboard's actor bot on the dashboard path); asserts channel provenance, not permission
+        type: string
+        required: true
+      requested-by:
+        description: "Operator identity (email/login) requesting the merge — log-only attribution"
+        type: string
+        default: ""
 
 jobs:
   merge:
@@ -37,6 +55,24 @@ jobs:
     permissions:
       contents: read
     steps:
+      # On workflow_dispatch, github.actor is whoever authenticated the
+      # dispatch. When the release dashboard dispatches via its actor app,
+      # that's convos-dashboard-actor[bot] — so inputs.actor == github.actor
+      # asserts the dispatch genuinely came through the dashboard's actor app
+      # (channel provenance), not that a human proved their identity.
+      # workflow_call callers (conductor-merge.yml) pass the authenticated
+      # commenter and never run this step.
+      - name: Verify dispatch actor
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CLAIMED: ${{ inputs.actor }}
+          REAL: ${{ github.actor }}
+        run: |
+          if [ "$CLAIMED" != "$REAL" ]; then
+            echo "::error::workflow_dispatch actor '$CLAIMED' does not match the authenticated dispatcher '$REAL'"
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           # No pushes here (the merge is an API call), but persist-credentials:
@@ -77,5 +113,8 @@ jobs:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           TRAIN_VERSION: ${{ inputs.version }}
           TRAIN_ACTOR: ${{ inputs.actor }}
+          TRAIN_REQUESTED_BY: ${{ inputs.requested-by || '' }}
+          TRAIN_EVENT_NAME: ${{ github.event_name }}
         run: |
-          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR"
+          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR" \
+            --requested-by "$TRAIN_REQUESTED_BY" --event-name "$TRAIN_EVENT_NAME"

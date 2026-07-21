@@ -158,11 +158,13 @@ def cmd_promote_record(argv)
 end
 
 def cmd_merge(argv)
-  opts = { dry_run: false, version: nil, actor: nil }
+  opts = { dry_run: false, version: nil, actor: nil, requested_by: nil, event_name: nil }
   OptionParser.new do |o|
-    o.banner = "Usage: train merge --version X.Y.Z --actor LOGIN [--dry-run]"
+    o.banner = "Usage: train merge --version X.Y.Z --actor LOGIN [--requested-by ID] [--event-name NAME] [--dry-run]"
     o.on("--version VERSION") { |v| opts[:version] = v }
     o.on("--actor LOGIN") { |v| opts[:actor] = v }
+    o.on("--requested-by ID") { |v| opts[:requested_by] = v }
+    o.on("--event-name NAME") { |v| opts[:event_name] = v }
     o.on("--dry-run") { opts[:dry_run] = true }
   end.parse!(argv)
 
@@ -172,7 +174,10 @@ def cmd_merge(argv)
 
   github = Train::Github.new(dry_run: opts[:dry_run])
   merge = Train::Merge.new(github: github)
-  unwrap_result(merge.run(version: opts[:version], actor: opts[:actor]))
+  unwrap_result(merge.run(
+    version: opts[:version], actor: opts[:actor],
+    event_name: opts[:event_name], requested_by: opts[:requested_by]
+  ))
 end
 
 def cmd_seed_notes(argv)
@@ -255,6 +260,31 @@ rescue Train::Versions::Error => e
   fail_loud(e.message)
 end
 
+def cmd_config(argv)
+  sub = argv.shift
+  case sub
+  when "add-skip-date"
+    cmd_config_add_skip_date(argv)
+  else
+    fail_loud("config: unknown subcommand '#{sub}' (expected: add-skip-date)")
+  end
+end
+
+def cmd_config_add_skip_date(argv)
+  opts = { dry_run: false, requested_by: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train config add-skip-date DATE [--requested-by LOGIN] [--dry-run]"
+    o.on("--requested-by LOGIN") { |v| opts[:requested_by] = v }
+    o.on("--dry-run") { opts[:dry_run] = true }
+  end.parse!(argv)
+  date = argv.shift
+  fail_loud("config add-skip-date: DATE is required") unless date
+
+  github = Train::Github.new(dry_run: opts[:dry_run])
+  edit = Train::ConfigEdit.new(github: github)
+  unwrap_result(edit.add_skip_date(date: date, requested_by: opts[:requested_by]))
+end
+
 def cmd_status(argv)
   version = argv.shift
   releases_dir = File.join(Dir.pwd, "releases")
@@ -319,14 +349,15 @@ COMMANDS = {
   "ai-notes" => method(:cmd_ai_notes),
   "bump-version" => method(:cmd_bump_version),
   "notes-lint" => method(:cmd_notes_lint),
-  "status" => method(:cmd_status)
+  "status" => method(:cmd_status),
+  "config" => method(:cmd_config)
 }.freeze
 
 command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|bump-version|notes-lint|status) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|bump-version|notes-lint|status|config) ..."
   exit 1
 end
 

@@ -1,0 +1,63 @@
+# Dashboard-driven edits to release-config.yml (currently: add a skip
+# date). All logic lives in Train::ConfigEdit; this only plumbs
+# credentials and inputs. Two clicks serialize via the concurrency group.
+name: Train Config
+
+on:
+  workflow_dispatch:
+    inputs:
+      add-skip-date:
+        description: "ISO date (YYYY-MM-DD) to add to skip-dates"
+        type: string
+        required: true
+      requested-by:
+        description: "GitHub login that requested this run via the release dashboard (log-only)"
+        type: string
+        default: ""
+
+# Deliberately NOT the release-train group: a config push racing a cut's
+# manifest push is resolved at the git layer (StateWriter retries), so the
+# two workflows need not serialize with each other — only with themselves.
+#
+# GitHub's concurrency group keeps at most one running + one pending; a
+# third near-simultaneous request is dropped, not queued. Acceptable here:
+# skip-week edits are rare, manual, and each dispatch shows its own run —
+# if a run was superseded, just re-dispatch. Deliberate, not a queue.
+concurrency:
+  group: train-config
+  cancel-in-progress: false
+
+jobs:
+  config:
+    runs-on: warp-ubuntu-latest-x64-8x
+    timeout-minutes: 10
+    permissions:
+      contents: read    # pushes use the bot token, not GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v33
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
+
+      - name: Mint bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: xmtplabs
+          repositories: convos-releases
+
+      - name: Add skip date
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TRAIN_SKIP_DATE: ${{ inputs.add-skip-date }}
+          TRAIN_REQUESTED_BY: ${{ inputs.requested-by || '' }}
+        run: |
+          [ -n "$TRAIN_REQUESTED_BY" ] && echo "::notice::requested via release dashboard by $TRAIN_REQUESTED_BY"
+          nix develop --command train config add-skip-date "$TRAIN_SKIP_DATE" --requested-by "$TRAIN_REQUESTED_BY"

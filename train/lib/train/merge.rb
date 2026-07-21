@@ -26,7 +26,7 @@ module Train
     # run: Success(:ok) once every repo merged or was already merged;
     # Failure(joined per-repo reasons) otherwise. Under dry-run the read-only
     # gate/lookup still run; pr_merge's own mutate! gate no-ops the merge.
-    def run(version:, actor:)
+    def run(version:, actor:, event_name: nil, requested_by: nil)
       # version comes from a caller-resolved branch name and is used in paths
       # and refs — reject anything that isn't X.Y.Z first.
       unless Versions.valid?(version)
@@ -35,11 +35,21 @@ module Train
 
       repos, kind, rc_shas = yield read_manifest(version)
 
-      # Phase 1: gate EVERY repo before merging anything.
-      permissions = repos.to_h { |repo| [repo, check_permission(repo: repo, actor: actor)] }
-      gate_failures = permissions.select { |_repo, result| result.failure? }
-      unless gate_failures.empty?
-        return Failure(gate_failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
+      # Phase 1: gate EVERY repo before merging anything — EXCEPT on the
+      # workflow_dispatch path, where Cloudflare Access (the release-dashboard
+      # /actions/* app, team-scoped) already authorized the human and GitHub
+      # required write to dispatch at all. The collaborator re-check is
+      # redundant there and can't run anyway (the dispatch actor is the bot).
+      # The comment/workflow_call path keeps the full gate (looser
+      # author_association trigger, real human login).
+      if event_name == "workflow_dispatch"
+        @out.puts "merge dispatched via dashboard by #{requested_by || "unknown"} (permission gate skipped — Access-authorized)"
+      else
+        permissions = repos.to_h { |repo| [repo, check_permission(repo: repo, actor: actor)] }
+        gate_failures = permissions.select { |_repo, result| result.failure? }
+        unless gate_failures.empty?
+          return Failure(gate_failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
+        end
       end
 
       # Phase 2: merge each repo; the manifest "kind" decides the branch-name

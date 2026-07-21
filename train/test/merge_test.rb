@@ -382,6 +382,33 @@ class MergeTest < Minitest::Test
     assert_match(/#{Regexp.escape(IOS)}: Head branch was modified/, result.failure)
   end
 
+  # ---- workflow_dispatch: permission gate skipped (channel already gated) ----
+
+  def test_workflow_dispatch_skips_permission_check
+    both_repos_have_open_release_prs
+    @gh.stub_permission(IOS, "read")
+    @gh.stub_permission(CLIENT, "read")
+
+    result = new_merge.run(version: VERSION, actor: "convos-dashboard-actor[bot]",
+                            event_name: "workflow_dispatch", requested_by: "op@xmtp.com")
+
+    assert result.success?, "dispatch path should merge despite non-write permission"
+    refute @gh.called?(:collaborator_permission), "the gate must be skipped entirely, not merely passed"
+    assert_match(/merge dispatched via dashboard by op@xmtp\.com/, @out.string)
+  end
+
+  def test_comment_path_still_gates_on_permission
+    stub_manifest
+    @gh.stub_permission(IOS, "read")
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "someuser")
+
+    assert result.failure?, "non-dispatch path must still enforce write"
+    assert_match(/lacks write/, result.failure)
+  end
+
   # ---- dry-run ----
 
   def test_dry_run_runs_permission_and_lookup_but_does_not_actually_merge
