@@ -1,29 +1,17 @@
 # Submission notes for 2.1.0
 
-_For app reviewers: summarize user-visible changes, test-account hints._
+For app reviewers: this release adds a first-launch profile setup step and a one-tap way to leave a group, plus stability fixes. No test account is required — every flow below is reachable from a fresh install.
 
-## Features
-- feat(onboarding): first-launch profile setup sheet (#116)
+## What's new
+- First-launch profile setup: on first launch, a "Hello / My name is" sheet asks for a name and photo before you enter the app. It can also be reopened anytime from Settings > My info to edit your name or photo.
+- Leave a group: open any group's Info screen and tap Leave to remove yourself from the group in one step, with an immediate confirmation prompt. If you are the group's only super admin, the admin role is automatically handed to another member first so the group keeps an admin.
 
 ## Fixes
-- fix: one agent contact per template (#128)
-- fix: send typed join idempotency key on agent invites so retried joins adopt the in-flight instance (#112)
-- fix(telemetry): trace review follow-ups from #85 Macroscope pass (#107)
+- Agent contacts no longer appear duplicated in the contacts list.
+- Retried invites to add an agent to a conversation now correctly resume the in-flight invite instead of creating a duplicate agent.
+- Minor contacts-screen cleanup (removed a stray "Skip" button, fixed list scrolling).
 
-## Other
-- chore: bump convos-releases to 41eaa61a (store-rendered release notes) (#127)
-- remove skip button and fix scroll on contacts page (#126)
-- Reconcile: merge main into dev (#125)
-- Add developer toggle to enable XMTP bidi streaming on next launch (#123)
-- style improvements for android username on new user launch nux (#121)
-- Promotion caller + conductor merge command (#120)
-- ci: release-train RC callers + firebase prod stream + train in devshell (#114)
-- Renovate manages the convos-releases flake input (#111)
-- Bump convos-releases pin (play_internal metadata_path fix) (#110)
-- Scheduled Play internal-track builds (#108)
-- Merge main into dev (#106)
-- Mproberts/version 2.0.6 bump (#105)
-- Add PR ad-hoc android builds via Firebase App Distribution (#102)
-- Dev merge for qr feature (#98)
-- Insipx/telemetry export toggle (#85)
-
+## How to test
+- Reinstall (or use a fresh device/simulator) to see the profile setup sheet appear automatically on first launch; type a name and/or add a photo, then tap "Come in." Re-launching before saving should show the sheet again.
+- To edit later, go to Settings > My info and tap the pencil next to your name/photo.
+- Create or join a group with at least one other member, open Group Info, and tap Leave to confirm the group is removed from your conversation list.
