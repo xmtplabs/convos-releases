@@ -26,4 +26,16 @@ platform :ios do
       )
     end
   end
+
+  desc "One-time: create App Store profiles for the dev TestFlight bundle ids"
+  lane :sync_match_dev_appstore do
+    setup_app_store_connect_api_key
+
+    match(
+      type: "appstore",
+      readonly: false,
+      app_identifier: [DEV_BUNDLE_ID, DEV_NSE_BUNDLE_ID, DEV_SHARE_EXTENSION_BUNDLE_ID],
+      skip_certificate_matching: true,
+    )
+  end
 end
