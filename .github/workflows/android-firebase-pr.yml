@@ -12,7 +12,7 @@ on:
       runner:
         description: Runner label for the build job
         type: string
-        default: warp-ubuntu-latest-x64-8x
+        default: blacksmith-8vcpu-ubuntu-2404
       project-dir:
         description: Directory containing the gradle root (and fastlane/ stub)
         type: string
@@ -58,17 +58,14 @@ jobs:
         with:
           submodules: true
 
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v33
+      - name: Set up Nix
+        # Qualified ref: reusable workflows check out the CALLER's repo.
+        # sticky-disk gates on the label so non-Blacksmith callers are
+        # unaffected.
+        uses: xmtplabs/convos-releases/.github/actions/setup-nix@main
         with:
-          nix_conf: |
-            experimental-features = nix-command flakes
-
-      - name: Set up xmtp Cachix cache
-        uses: cachix/cachix-action@v15
-        with:
-          name: xmtp
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          sticky-disk: ${{ startsWith(inputs.runner, 'blacksmith') }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Enter dev shell
         uses: nicknovitski/nix-develop@v1
