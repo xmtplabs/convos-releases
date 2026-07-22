@@ -1,5 +1,8 @@
-# Custom runner labels (WarpBuild) so actionlint accepts them in runs-on.
+# Custom runner labels (WarpBuild + Blacksmith) so actionlint accepts
+# them in runs-on.
 self-hosted-runner:
   labels:
     - warp-ubuntu-latest-x64-8x
     - warp-macos-latest-arm64-12x
+    - blacksmith-4vcpu-ubuntu-2404
+    - blacksmith-8vcpu-ubuntu-2404

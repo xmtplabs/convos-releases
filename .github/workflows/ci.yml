@@ -5,20 +5,16 @@ on:
     branches: [main]
 jobs:
   test:
-    runs-on: warp-ubuntu-latest-x64-8x
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - uses: nixbuild/nix-quick-install-action@v33
+      - name: Set up Nix
+        uses: ./.github/actions/setup-nix
         with:
-          nix_conf: |
-            experimental-features = nix-command flakes
-      - name: Set up xmtp Cachix cache
-        uses: cachix/cachix-action@v15
-        with:
-          name: xmtp
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          sticky-disk: "true"
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Ruby tests
         run: nix build -L .#train
       - name: Lint workflows
