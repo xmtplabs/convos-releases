@@ -31,6 +31,10 @@ on:
         description: "optional single repo OWNER/NAME for a one-platform hotfix"
         type: string
         default: ""
+      requested-by:
+        description: "GitHub login that requested this run via the release dashboard (log-only)"
+        type: string
+        default: ""
 
 concurrency:
   group: release-train
@@ -83,7 +87,9 @@ jobs:
           TRAIN_DRY_RUN: ${{ inputs.dry-run || 'false' }}
           TRAIN_HOTFIX_BASE_TAG: ${{ inputs.hotfix-base-tag || '' }}
           TRAIN_HOTFIX_REPO: ${{ inputs.hotfix-repo || '' }}
+          TRAIN_REQUESTED_BY: ${{ inputs.requested-by || '' }}
         run: |
+          [ -n "$TRAIN_REQUESTED_BY" ] && echo "::notice::requested via release dashboard by $TRAIN_REQUESTED_BY"
           if [ -n "$TRAIN_HOTFIX_BASE_TAG" ]; then
             args=(hotfix --base-tag "$TRAIN_HOTFIX_BASE_TAG")
             [ "$TRAIN_DRY_RUN" = "true" ] && args+=(--dry-run)

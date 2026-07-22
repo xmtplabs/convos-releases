@@ -22,6 +22,16 @@ on:
         required: true
       RELEASES_BOT_PRIVATE_KEY:
         required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release (or hotfix) version (X.Y.Z) to merge
+        type: string
+        required: true
+      actor:
+        description: GitHub login requesting the merge (permission-gated)
+        type: string
+        required: true
 
 jobs:
   merge:
@@ -37,6 +47,20 @@ jobs:
     permissions:
       contents: read
     steps:
+      # workflow_call callers (conductor-merge.yml) pass the authenticated
+      # commenter; only the direct workflow_dispatch path can forge actor,
+      # so bind it to github.actor there.
+      - name: Verify dispatch actor
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CLAIMED: ${{ inputs.actor }}
+          REAL: ${{ github.actor }}
+        run: |
+          if [ "$CLAIMED" != "$REAL" ]; then
+            echo "::error::workflow_dispatch actor '$CLAIMED' does not match the authenticated dispatcher '$REAL'"
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           # No pushes here (the merge is an API call), but persist-credentials:

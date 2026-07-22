@@ -328,6 +328,11 @@ day acts — so no worker or workflow edit is needed.
 Everything downstream is day-agnostic: RCs, merge, and promotion key off
 the manifest, not the calendar.
 
+A skip date that lands AFTER that day's cut already fired does nothing for
+that day — but it blocks a same-day non-forced re-dispatch from reconciling
+an interrupted cut ("Skip date <date>"). Remove the date (pencil edit) or
+re-dispatch with `force: true` to converge.
+
 ## Troubleshooting (all observed live unless noted)
 
 | Symptom | Cause | Fix |
