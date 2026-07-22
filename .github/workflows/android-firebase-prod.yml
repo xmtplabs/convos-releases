@@ -105,3 +105,17 @@ jobs:
           path: ${{ inputs.project-dir }}/app/build/outputs/apk/prod/release/*.apk
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Release /nix for sticky-disk commit
+        # Gradle/Kotlin build daemons outlive the build with /nix/store
+        # jars held open, so the sticky-disk post-step's umount gets
+        # EBUSY and the disk never commits — every run then starts cold.
+        # The build is finished here; kill whatever still uses the mount.
+        # /usr/bin/bash, not the dev-shell bash: the latter lives in
+        # /nix and would be killed mid-step.
+        if: always() && startsWith(inputs.runner, 'blacksmith')
+        shell: /usr/bin/bash {0}
+        run: |
+          sudo fuser -k -m /nix 2>/dev/null
+          sleep 2
+          exit 0
