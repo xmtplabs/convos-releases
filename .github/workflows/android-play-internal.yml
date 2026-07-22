@@ -48,6 +48,17 @@ jobs:
           sticky-disk: ${{ startsWith(inputs.runner, 'blacksmith') }}
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      - name: Mount gradle cache sticky disk
+        if: startsWith(inputs.runner, 'blacksmith')
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-gradle
+          path: /home/runner/.gradle
+
+      - name: Own gradle cache
+        if: startsWith(inputs.runner, 'blacksmith')
+        run: sudo chown "$(id -u):$(id -g)" /home/runner/.gradle
+
       - name: Enter dev shell
         uses: nicknovitski/nix-develop@v1
         with:
@@ -125,20 +136,28 @@ jobs:
             --run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --key version-code --value "${VERSION_CODE:?lane did not publish version-code}"
 
-      - name: Release /nix for sticky-disk commit
+      - name: Release sticky-disk mounts for commit
         # Gradle/Kotlin build daemons outlive the build with /nix/store
-        # jars held open, so the sticky-disk post-step's umount gets
-        # EBUSY and the disk never commits — every run then starts cold.
-        # Kill remaining /nix users EXCEPT the cachix daemon: its own
-        # post step stops it cleanly (and fails the job if it is already
-        # dead) before the sticky-disk post unmounts.
+        # jars (and ~/.gradle locks) held open, so the sticky-disk
+        # post-steps' umounts get EBUSY and the disks never commit —
+        # every run then starts cold. Kill remaining users of the mounts
+        # EXCEPT the cachix daemon: its own post step stops it cleanly
+        # (and fails the job if it is already dead) before the nix
+        # sticky-disk post unmounts.
+        # mountpoint guard: fuser -m on a non-mountpoint would target the
+        # whole containing filesystem (/) and kill everything.
         # /usr/bin/bash, not the dev-shell bash: the latter lives in
         # /nix and would be killed mid-step.
         if: always() && startsWith(inputs.runner, 'blacksmith')
         shell: /usr/bin/bash {0}
         run: |
+          targets=()
+          for m in /nix /home/runner/.gradle; do
+            mountpoint -q "$m" && targets+=("$m")
+          done
+          [ "${#targets[@]}" -gt 0 ] || exit 0
           keep="$(pgrep -f 'cachix daemon' || true)"
-          for pid in $(sudo fuser -m /nix 2>/dev/null); do
+          for pid in $(sudo fuser -m "${targets[@]}" 2>/dev/null); do
             echo "$keep" | grep -qx "$pid" || sudo kill -9 "$pid" 2>/dev/null
           done
           sleep 2
