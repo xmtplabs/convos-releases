@@ -129,12 +129,17 @@ jobs:
         # Gradle/Kotlin build daemons outlive the build with /nix/store
         # jars held open, so the sticky-disk post-step's umount gets
         # EBUSY and the disk never commits — every run then starts cold.
-        # The build is finished here; kill whatever still uses the mount.
+        # Kill remaining /nix users EXCEPT the cachix daemon: its own
+        # post step stops it cleanly (and fails the job if it is already
+        # dead) before the sticky-disk post unmounts.
         # /usr/bin/bash, not the dev-shell bash: the latter lives in
         # /nix and would be killed mid-step.
         if: always() && startsWith(inputs.runner, 'blacksmith')
         shell: /usr/bin/bash {0}
         run: |
-          sudo fuser -k -m /nix 2>/dev/null
+          keep="$(pgrep -f 'cachix daemon' || true)"
+          for pid in $(sudo fuser -m /nix 2>/dev/null); do
+            echo "$keep" | grep -qx "$pid" || sudo kill -9 "$pid" 2>/dev/null
+          done
           sleep 2
           exit 0
