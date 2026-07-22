@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   notes-lint:
-    runs-on: warp-ubuntu-latest-x64-8x
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read
@@ -84,12 +84,11 @@ jobs:
           echo "versions=${versions}" >> "$GITHUB_OUTPUT"
           echo "Changed versions: ${versions:-none}"
 
-      - name: Install Nix
+      - name: Set up Nix
         if: steps.changed.outputs.versions != ''
-        uses: nixbuild/nix-quick-install-action@v33
+        uses: ./.github/actions/setup-nix
         with:
-          nix_conf: |
-            experimental-features = nix-command flakes
+          sticky-disk: "true"
 
       - uses: nicknovitski/nix-develop@v1
         if: steps.changed.outputs.versions != ''

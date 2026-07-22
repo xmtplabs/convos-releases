@@ -1,0 +1,53 @@
+# Provision Nix for a CI job. On Blacksmith runners, optionally mounts a
+# sticky disk at /nix so the store persists across runs (last committed
+# snapshot is cloned per job; concurrent jobs race, last commit wins —
+# benign for a Nix store, Cachix re-substitutes anything lost). Entering
+# the dev shell (nicknovitski/nix-develop) is left to the caller.
+#
+# Repo-local workflows reference this via ./.github/actions/setup-nix;
+# reusable workflows check out the CALLER's repo, so they must use the
+# qualified xmtplabs/convos-releases/.github/actions/setup-nix@main ref.
+name: Set up Nix
+description: Sticky-disk /nix (Blacksmith), nix-quick-install, optional xmtp Cachix
+
+inputs:
+  sticky-disk:
+    description: >
+      "true" to mount a Blacksmith sticky disk at /nix before installing
+      Nix. Only valid on blacksmith-* runners; leave "false" elsewhere.
+    required: false
+    default: "false"
+  cachix-auth-token:
+    description: Auth token for the xmtp Cachix cache; skipped when empty.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Mount /nix sticky disk
+      if: inputs.sticky-disk == 'true'
+      uses: useblacksmith/stickydisk@v1
+      with:
+        key: ${{ github.repository }}-nix
+        path: /nix
+
+    - name: Own /nix
+      if: inputs.sticky-disk == 'true'
+      shell: bash
+      # Non-recursive: single-user Nix only needs the top level writable,
+      # and a recursive chown over a warm store is slow.
+      run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+
+    - name: Install Nix
+      uses: nixbuild/nix-quick-install-action@v33
+      with:
+        nix_conf: |
+          experimental-features = nix-command flakes
+
+    - name: Set up xmtp Cachix cache
+      if: inputs.cachix-auth-token != ''
+      uses: cachix/cachix-action@v15
+      with:
+        name: xmtp
+        authToken: ${{ inputs.cachix-auth-token }}
