@@ -11,6 +11,7 @@ module Train
   # a Slack outage must never fail a completed cut.
   class Notify
     RELEASES_URL = "https://github.com/xmtplabs/convos-releases"
+    DASHBOARD_URL = "https://releases.convos.fun"
     SLACK_API = "https://slack.com/api/chat.postMessage"
 
     def initialize(bot_token: ENV["SLACK_BOT_TOKEN"], channel: ENV["SLACK_CHANNEL_APP"],
@@ -44,8 +45,8 @@ module Train
         🚂 *#{kind} #{version} cut* — release branches are open; every push uploads an RC.
         • Release PRs: <#{ios_pr}|iOS> · <#{android_pr}|Android>
         • <#{RELEASES_URL}/tree/main/releases/#{version}|Release notes #{version}> — pencil-edit before merging
-        • <#{RELEASES_URL}/blob/main/RUNBOOK.md|Runbook>
-        When QA passes, comment `@convos-conductor merge` on a release PR.
+        • <#{RELEASES_URL}/blob/main/RUNBOOK.md|Runbook> · <#{DASHBOARD_URL}|Release dashboard>
+        When QA passes, comment `@convos-conductor merge` on a release PR — or use the dashboard.
       TEXT
     end
 

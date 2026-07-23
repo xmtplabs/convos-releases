@@ -18,6 +18,18 @@ module Train
     # regardless of who triggered, so re-check the actor rather than trust it.
     ALLOWED_PERMISSIONS = %w[admin write maintain].freeze
 
+    # The release-dashboard actor app's bot login, as GitHub sets github.actor
+    # (and the workflow's inputs.actor) when the dashboard dispatches a merge.
+    # This is the app's SLUG + "[bot]" — the app is named "convos-dashboard-actor"
+    # but its slug is "release-control-dashboard" (verified against the GitHub
+    # API: user login "release-control-dashboard[bot]", type Bot, id 307763101).
+    # On the workflow_dispatch path we require the actor to be exactly this bot,
+    # so ONLY a dashboard-originated dispatch skips the per-repo write gate — a
+    # human dispatching train-merge directly (their own login as actor) is
+    # rejected here, closing the escalation where Actions-write on the public
+    # releases repo would otherwise let someone merge app repos they can't write.
+    DASHBOARD_ACTOR_LOGIN = "release-control-dashboard[bot]"
+
     def initialize(github:, out: $stdout)
       @gh = github
       @out = out
@@ -26,7 +38,7 @@ module Train
     # run: Success(:ok) once every repo merged or was already merged;
     # Failure(joined per-repo reasons) otherwise. Under dry-run the read-only
     # gate/lookup still run; pr_merge's own mutate! gate no-ops the merge.
-    def run(version:, actor:)
+    def run(version:, actor:, event_name: nil, requested_by: nil)
       # version comes from a caller-resolved branch name and is used in paths
       # and refs — reject anything that isn't X.Y.Z first.
       unless Versions.valid?(version)
@@ -35,11 +47,27 @@ module Train
 
       repos, kind, rc_shas = yield read_manifest(version)
 
-      # Phase 1: gate EVERY repo before merging anything.
-      permissions = repos.to_h { |repo| [repo, check_permission(repo: repo, actor: actor)] }
-      gate_failures = permissions.select { |_repo, result| result.failure? }
-      unless gate_failures.empty?
-        return Failure(gate_failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
+      # Phase 1: gate before merging anything. The workflow_dispatch path skips
+      # the per-repo collaborator check ONLY when the dispatch came through the
+      # release-dashboard's actor app — proven by the actor being that bot
+      # (the workflow additionally binds inputs.actor == github.actor, so the
+      # bot login can't be spoofed by a direct dispatcher). The dashboard is
+      # itself gated by the team-scoped Cloudflare Access /actions/* app, and
+      # the bot holds no personal write to re-check. A direct human dispatch —
+      # anyone with Actions-write on this PUBLIC repo, invoking train-merge from
+      # the GitHub UI with their own login as actor — is NOT the bot, so it
+      # falls through to the full per-repo write gate and cannot merge app repos
+      # (convos-ios / convos-client) it lacks write on. The comment/workflow_call
+      # path also keeps the full gate (real human login, looser trigger).
+      dashboard_dispatch = event_name == "workflow_dispatch" && actor == DASHBOARD_ACTOR_LOGIN
+      if dashboard_dispatch
+        @out.puts "merge dispatched via dashboard by #{requested_by || "unknown"} (Access-authorized; per-repo gate skipped for the bot actor)"
+      else
+        permissions = repos.to_h { |repo| [repo, check_permission(repo: repo, actor: actor)] }
+        gate_failures = permissions.select { |_repo, result| result.failure? }
+        unless gate_failures.empty?
+          return Failure(gate_failures.map { |repo, result| "#{repo}: #{result.failure}" }.join("; "))
+        end
       end
 
       # Phase 2: merge each repo; the manifest "kind" decides the branch-name

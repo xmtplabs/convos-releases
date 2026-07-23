@@ -19,6 +19,7 @@ class NotifyTest < Minitest::Test
     assert_match(/release 2\.1\.0 cut/, text)
     assert_includes text, "https://github.com/xmtplabs/convos-releases/tree/main/releases/2.1.0"
     assert_includes text, "https://github.com/xmtplabs/convos-releases/blob/main/RUNBOOK.md"
+    assert_includes text, "https://releases.convos.fun"
     assert_includes text, "@convos-conductor merge"
     assert_includes text, "https://github.com/xmtplabs/convos-ios/pulls?q=is%3Apr+head%3Arelease%2F2.1.0"
     assert_includes text, "https://github.com/xmtplabs/convos-client/pulls?q=is%3Apr+head%3Arelease%2F2.1.0"

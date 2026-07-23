@@ -382,6 +382,52 @@ class MergeTest < Minitest::Test
     assert_match(/#{Regexp.escape(IOS)}: Head branch was modified/, result.failure)
   end
 
+  # ---- workflow_dispatch: gate skipped ONLY for the dashboard actor bot ----
+
+  def test_workflow_dispatch_from_dashboard_bot_skips_permission_check
+    both_repos_have_open_release_prs
+    @gh.stub_permission(IOS, "read")
+    @gh.stub_permission(CLIENT, "read")
+
+    # actor IS the dashboard actor bot → provenance proven → gate skipped.
+    result = new_merge.run(version: VERSION, actor: "release-control-dashboard[bot]",
+                            event_name: "workflow_dispatch", requested_by: "op@xmtp.com")
+
+    assert result.success?, "dashboard dispatch should merge despite non-write permission"
+    refute @gh.called?(:collaborator_permission), "the gate must be skipped entirely for the bot, not merely passed"
+    assert_match(/merge dispatched via dashboard by op@xmtp\.com/, @out.string)
+  end
+
+  def test_workflow_dispatch_from_a_human_still_gates_on_permission
+    # A human invoking train-merge directly via the GitHub UI on the PUBLIC
+    # releases repo (their own login as actor, NOT the dashboard bot) must NOT
+    # skip the gate — otherwise Actions-write on releases would let them merge
+    # app repos they lack write on. They fall through to the full per-repo gate.
+    stub_manifest
+    @gh.stub_permission(IOS, "read")
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "randodev",
+                            event_name: "workflow_dispatch", requested_by: "randodev")
+
+    assert result.failure?, "a direct human dispatch must still enforce per-repo write"
+    assert_match(/lacks write/, result.failure)
+    assert @gh.called?(:collaborator_permission), "the gate must run for a non-bot dispatch actor"
+  end
+
+  def test_comment_path_still_gates_on_permission
+    stub_manifest
+    @gh.stub_permission(IOS, "read")
+    stub_open_release_pr(IOS, 10)
+    stub_open_release_pr(CLIENT, 20)
+
+    result = new_merge.run(version: VERSION, actor: "someuser")
+
+    assert result.failure?, "non-dispatch path must still enforce write"
+    assert_match(/lacks write/, result.failure)
+  end
+
   # ---- dry-run ----
 
   def test_dry_run_runs_permission_and_lookup_but_does_not_actually_merge
