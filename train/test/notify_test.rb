@@ -98,6 +98,17 @@ class NotifyTest < Minitest::Test
     assert_match(/ratelimited/, error.message)
   end
 
+  def test_announce_wraps_network_errors_as_notify_error
+    n = notify
+    # deliver raises a raw network error; announce must honor its fail-loud
+    # contract and surface Notify::Error, not the bare exception.
+    n.define_singleton_method(:deliver) { |_text| raise Errno::ECONNREFUSED }
+
+    error = assert_raises(Train::Notify::Error) { n.announce(version: "2.2.0", kind: "release") }
+    assert_match(/Slack post to C0APP failed/, error.message)
+    assert_match(/ECONNREFUSED/, error.message)
+  end
+
   def test_announce_raises_when_token_or_channel_unset
     assert_raises(Train::Notify::Error) do
       notify(bot_token: nil).announce(version: "2.2.0", kind: "release")
