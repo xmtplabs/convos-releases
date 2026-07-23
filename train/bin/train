@@ -239,24 +239,40 @@ def manifest_announcement(version)
   { channel: channel, ts: ts }
 end
 
-def cmd_bump_version(argv)
-  mode = argv.shift
-  dir = argv.shift
-  new_version = argv.shift
+# Re-send the cut/hotfix Slack announcement for an already-cut release — the
+# best-effort post inside Cut#run has no re-run path, so a failed announce
+# (e.g. bot missing chat:write or not in-channel) otherwise means the release
+# is never announced. Fail-loud: if the user asked to send it, a silent skip
+# would be wrong. On success, persists the {channel:, ts:} anchor to the
+# manifest so a later ai-notes re-fire threads under it — same as Cut#run.
+def cmd_notify(argv)
+  opts = { version: nil, kind: nil }
+  OptionParser.new do |o|
+    o.banner = "Usage: train notify --version X.Y.Z [--kind release|hotfix]"
+    o.on("--version VERSION") { |v| opts[:version] = v }
+    o.on("--kind KIND") { |v| opts[:kind] = v }
+  end.parse!(argv)
 
-  fail_loud("bump-version: usage: train bump-version (read|bump) DIR [NEW_VERSION]") unless mode && dir
+  fail_loud("notify: --version is required") unless opts[:version]
+  fail_loud("notify: bad version '#{opts[:version]}'") unless Train::Versions.valid?(opts[:version])
 
-  case mode
-  when "read"
-    puts Train::Versions.read(dir)
-  when "bump"
-    fail_loud("bump-version: bump needs NEW_VERSION") unless new_version
-    Train::Versions.bump(dir, new_version)
-    puts new_version
-  else
-    fail_loud("bump-version: unknown mode '#{mode}'")
+  mfile = File.join(Dir.pwd, "releases", opts[:version], "manifest.yml")
+  # kind comes from the manifest so links use the right release/ vs hotfix/
+  # branch prefix; --kind overrides (or supplies it when no manifest exists).
+  kind = opts[:kind] || (File.exist?(mfile) && Train::Manifest.read(mfile)["kind"])
+  fail_loud("notify: no manifest at #{mfile} and no --kind given") unless kind
+  unless %w[release hotfix].include?(kind)
+    fail_loud("notify: kind must be release or hotfix, got '#{kind}'")
   end
-rescue Train::Versions::Error => e
+
+  anchor = Train::Notify.new.announce(version: opts[:version], kind: kind)
+  if File.exist?(mfile)
+    Train::Manifest.set_announcement(mfile, **anchor)
+    puts "notify: anchored announcement in #{mfile}"
+  else
+    puts "notify: no manifest at #{mfile} — posted without persisting an anchor"
+  end
+rescue Train::Notify::Error => e
   fail_loud(e.message)
 end
 
@@ -276,10 +292,35 @@ def cmd_check_versions(argv)
     end
   end.parse!(argv)
 
+  # Everything must arrive via --dir; a bare "ios=/ios" (a --dir the user
+  # forgot to prefix) would otherwise be dropped silently and the check pass
+  # having seen fewer repos than intended.
+  fail_loud("check-versions: unexpected argument(s): #{argv.join(" ")} (each checkout needs --dir)") unless argv.empty?
   fail_loud("check-versions: at least one --dir LABEL=PATH is required") if pairs.empty?
 
   version = Train::Versions.check_aligned(pairs)
   puts "check-versions: ok — all app checkouts at #{version}"
+rescue Train::Versions::Error => e
+  fail_loud(e.message)
+end
+
+def cmd_bump_version(argv)
+  mode = argv.shift
+  dir = argv.shift
+  new_version = argv.shift
+
+  fail_loud("bump-version: usage: train bump-version (read|bump) DIR [NEW_VERSION]") unless mode && dir
+
+  case mode
+  when "read"
+    puts Train::Versions.read(dir)
+  when "bump"
+    fail_loud("bump-version: bump needs NEW_VERSION") unless new_version
+    Train::Versions.bump(dir, new_version)
+    puts new_version
+  else
+    fail_loud("bump-version: unknown mode '#{mode}'")
+  end
 rescue Train::Versions::Error => e
   fail_loud(e.message)
 end
@@ -371,6 +412,7 @@ COMMANDS = {
   "merge" => method(:cmd_merge),
   "seed-notes" => method(:cmd_seed_notes),
   "ai-notes" => method(:cmd_ai_notes),
+  "notify" => method(:cmd_notify),
   "bump-version" => method(:cmd_bump_version),
   "check-versions" => method(:cmd_check_versions),
   "notes-lint" => method(:cmd_notes_lint),
@@ -382,7 +424,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|bump-version|check-versions|notes-lint|status|config) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|notify|bump-version|check-versions|notes-lint|status|config) ..."
   exit 1
 end
 
