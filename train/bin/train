@@ -267,6 +267,11 @@ def cmd_check_versions(argv)
     o.on("--dir PAIR", "app checkout as LABEL=PATH (repeatable)") do |pair|
       label, path = pair.split("=", 2)
       fail_loud("check-versions: --dir must be LABEL=PATH, got '#{pair}'") if path.nil? || label.empty?
+      # Reject duplicate labels: silently overwriting would drop a checkout, so
+      # the check could pass having validated fewer repos than asked — the
+      # opposite of a guard's job. (A miswired caller with self==sibling hits
+      # this too.)
+      fail_loud("check-versions: duplicate --dir label '#{label}'") if pairs.key?(label)
       pairs[label] = path
     end
   end.parse!(argv)
