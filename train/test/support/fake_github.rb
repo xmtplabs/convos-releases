@@ -68,6 +68,19 @@ class FakeGithub
     @rev_parses[[dir_suffix, ref]] = sha
   end
 
+  def stub_commit_authors(dir_suffix, range, authors)
+    @commit_authors ||= {}
+    @commit_authors[[dir_suffix, range]] = authors
+  end
+
+  def fail_commit_authors(dir_suffix, message: "simulated log failure")
+    (@commit_authors_failures ||= {})[dir_suffix] = message
+  end
+
+  def stub_remote_url(dir_suffix, url)
+    (@remote_urls ||= {})[dir_suffix] = url
+  end
+
   def stub_pr_list(repo:, head: nil, base: nil, state: "open", result:)
     @pr_lists[[repo, head, base, state]] = result
   end
@@ -161,6 +174,23 @@ class FakeGithub
     record(:rev_parse, [dir, ref])
     @rev_parses ||= {}
     @rev_parses[[suffix(dir), ref]] || @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
+  end
+
+  def commit_authors(dir, range)
+    record(:commit_authors, [dir, range])
+    if (msg = (@commit_authors_failures ||= {})[suffix(dir)])
+      raise ::Train::Github::CommandError.new(
+        ["git", "-C", dir, "log", "--format=%ae", range], stdout: "", stderr: msg, status: fake_failed_status
+      )
+    end
+    (@commit_authors || {})[[suffix(dir), range]] || []
+  end
+
+  # Unstubbed -> "" (the promote guard treats an empty/mismatched origin as a
+  # wrong checkout and fails loud); stub_remote_url overrides per checkout.
+  def remote_url(dir)
+    record(:remote_url, [dir])
+    (@remote_urls || {})[suffix(dir)] || ""
   end
 
   # tag_sha: resolves refs/tags/<tag> on origin — "" when the tag doesn't

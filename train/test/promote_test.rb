@@ -381,6 +381,17 @@ class PromoteTest < Minitest::Test
         repos: repos
       )
     end
+    # Every release promotion now runs the back-merge guard against app_dir.
+    # Default it to the common "no divergence" path: dev and release resolve to
+    # the SAME sha, so the dev..tip range is empty -> no PR. Divergence tests
+    # override via stub_release_divergence.
+    return unless kind == "release"
+
+    app = File.basename(@app_dir)
+    gh.stub_remote_url(app, "https://github.com/#{repos.keys.first}.git")
+    gh.stub_ls_remote(app, "refs/heads/dev", "samesha")
+    gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "samesha")
+    gh.stub_commit_authors(app, "samesha..samesha", [])
   end
 
   def write_notes(app_dir: @app_dir, ios: nil, android: nil)
@@ -587,13 +598,168 @@ class PromoteTest < Minitest::Test
     assert_match(/conflict/i, back_merge.kwargs[:body])
   end
 
-  def test_record_on_release_manifest_does_not_open_back_merge_pr
+  # Model DISTINCT dev and release-tip shas so the divergence range is a real
+  # "devsha..releasesha"; commit_authors on that range yields `authors`.
+  def stub_release_divergence(authors:, dev_sha: "devsha", release_tip: "releasesha")
+    app = File.basename(@app_dir)
+    @gh.stub_ls_remote(app, "refs/heads/dev", dev_sha)
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", release_tip)
+    @gh.stub_commit_authors(app, "#{dev_sha}..#{release_tip}", authors)
+  end
+
+  def test_record_on_release_manifest_with_no_divergence_does_not_open_back_merge_pr
     stub_releases_clone(kind: "release")
+    # Empty dev..tip range (branch untouched since cut): commit_authors -> [] -> no PR.
+    stub_release_divergence(authors: [])
 
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" }, "release-kind manifest must not trigger a back-merge PR")
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" },
+           "release with no divergence must not trigger a back-merge PR")
+  end
+
+  def test_record_on_release_with_human_divergence_opens_back_merge_pr
+    stub_releases_clone(kind: "release")
+    stub_release_divergence(authors: ["human@example.com"])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" }
+    refute_nil back_merge, "expected a release/#{VERSION} -> dev back-merge PR"
+    assert_equal "dev", back_merge.kwargs[:base]
+    assert_equal REPO, back_merge.kwargs[:repo]
+    assert_match(/back-merge release #{VERSION}/i, back_merge.kwargs[:title])
+    # The range actually queried must be the two DISTINCT captured shas, in order.
+    authors_call = @gh.calls_for(:commit_authors).last
+    assert_equal "devsha..releasesha", authors_call.args[1]
+  end
+
+  def test_record_on_release_with_empty_author_email_still_opens_back_merge_pr
+    stub_releases_clone(kind: "release")
+    # A commit whose %ae is blank is NOT the bot identity -> must force a PR.
+    stub_release_divergence(authors: [""])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" },
+               "an empty-author commit must not be treated as the bot")
+  end
+
+  def test_record_on_release_with_only_bot_divergence_does_not_open_back_merge_pr
+    stub_releases_clone(kind: "release")
+    stub_release_divergence(authors: ["convos-conductor[bot]@users.noreply.github.com"])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" },
+           "bot-only divergence must not trigger a back-merge PR")
+  end
+
+  def test_record_release_back_merge_check_git_failure_is_a_hard_failure
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    # Diverge (distinct shas) so the check reaches commit_authors, then fail it —
+    # a regression to a non-raising author check must fail loud here, not skip.
+    @gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "releasesha")
+    @gh.fail_commit_authors(app, message: "simulated log failure")
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a git failure in the divergence check must abort record"
+    assert_match(/release back-merge check failed/, result.failure)
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
+    # Manifest promotion must NOT have been recorded (fail before the write).
+    refute(@gh.calls_for(:commit).any?, "manifest must be untouched on a hard check failure")
+  end
+
+  def test_record_on_release_with_deleted_branch_uses_merged_pr_head_sha
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    # Branch deleted on merge: ls_remote for it returns "" -> fall back to the
+    # merged release PR's head-sha, and still detect the human divergence.
+    @gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "")
+    @gh.stub_pr_list(repo: REPO, head: "release/#{VERSION}", base: "main", state: "all",
+                     result: [{ "merged_at" => "2026-07-16T00:00:00Z", "head-sha" => "mergedtip" }])
+    @gh.stub_commit_authors(app, "devsha..mergedtip", ["human@example.com"])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" },
+               "a deleted-but-diverged release branch must still back-merge via its merged PR tip")
+  end
+
+  def test_record_on_release_with_deleted_branch_picks_last_merged_pr
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    @gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "")
+    # GitHub lists newest-CREATED first; the LAST-merged (max merged_at) is the
+    # authoritative tip even when it was created earlier.
+    @gh.stub_pr_list(repo: REPO, head: "release/#{VERSION}", base: "main", state: "all", result: [
+                       { "merged_at" => "2026-07-15T00:00:00Z", "head-sha" => "newer-created-older-merge" },
+                       { "merged_at" => "2026-07-18T00:00:00Z", "head-sha" => "last-merged-tip" }
+                     ])
+    @gh.stub_commit_authors(app, "devsha..last-merged-tip", ["human@example.com"])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    # The range queried must use the LAST-merged PR's head-sha.
+    assert(@gh.calls_for(:commit_authors).any? { |c| c.args[1] == "devsha..last-merged-tip" },
+           "must resolve the tip from the last-merged PR, not the newest-created")
+  end
+
+  def test_record_on_release_with_missing_dev_fails_loud
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    @gh.stub_ls_remote(app, "refs/heads/dev", "") # dev gone/renamed — an anomaly
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a missing dev branch must abort record, not silently skip"
+    assert_match(/no dev branch/, result.failure)
+    refute(@gh.calls_for(:commit).any?, "manifest must be untouched")
+  end
+
+  def test_record_on_release_with_mismatched_app_dir_fails_loud
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    # Checkout is a sibling repo, not the one being promoted.
+    @gh.stub_remote_url(app, "https://github.com/xmtplabs/convos-ios-fork.git")
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a checkout that isn't the promoted repo must abort record"
+    assert_match(/is not a checkout of #{Regexp.escape(REPO)}/, result.failure)
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
+  end
+
+  def test_record_on_release_rejects_impostor_and_foreign_origins
+    # Each has the right owner/name path but is NOT github.com's repo, so the
+    # checkout-identity guard must reject it and abort record. A fresh FakeGithub
+    # per origin keeps the recorded pr_create calls isolated.
+    [
+      "https://gitlab.com/#{REPO}.git",              # foreign host
+      "https://notgithub.com/#{REPO}.git",           # host with github.com as a suffix
+      "https://gitlab.com/github.com/#{REPO}.git"    # github.com embedded mid-path
+    ].each do |origin|
+      gh = FakeGithub.new
+      stub_releases_clone(gh, kind: "release")
+      gh.stub_remote_url(File.basename(@app_dir), origin)
+
+      result = new_promote(gh).record(**record_args)
+
+      assert result.failure?, "origin #{origin} must abort record"
+      assert_match(/is not a checkout of #{Regexp.escape(REPO)}/, result.failure)
+      refute(gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" }, "no PR for #{origin}")
+    end
   end
 
   # back-merge now runs BEFORE the manifest write and is a HARD gate: a
