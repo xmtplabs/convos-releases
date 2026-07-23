@@ -276,6 +276,34 @@ rescue Train::Notify::Error => e
   fail_loud(e.message)
 end
 
+def cmd_check_versions(argv)
+  pairs = {}
+  OptionParser.new do |o|
+    o.banner = "Usage: train check-versions --dir LABEL=PATH [--dir LABEL=PATH ...]"
+    o.on("--dir PAIR", "app checkout as LABEL=PATH (repeatable)") do |pair|
+      label, path = pair.split("=", 2)
+      fail_loud("check-versions: --dir must be LABEL=PATH, got '#{pair}'") if path.nil? || label.empty?
+      # Reject duplicate labels: silently overwriting would drop a checkout, so
+      # the check could pass having validated fewer repos than asked — the
+      # opposite of a guard's job. (A miswired caller with self==sibling hits
+      # this too.)
+      fail_loud("check-versions: duplicate --dir label '#{label}'") if pairs.key?(label)
+      pairs[label] = path
+    end
+  end.parse!(argv)
+
+  # Everything must arrive via --dir; a bare "ios=/ios" (a --dir the user
+  # forgot to prefix) would otherwise be dropped silently and the check pass
+  # having seen fewer repos than intended.
+  fail_loud("check-versions: unexpected argument(s): #{argv.join(" ")} (each checkout needs --dir)") unless argv.empty?
+  fail_loud("check-versions: at least one --dir LABEL=PATH is required") if pairs.empty?
+
+  version = Train::Versions.check_aligned(pairs)
+  puts "check-versions: ok — all app checkouts at #{version}"
+rescue Train::Versions::Error => e
+  fail_loud(e.message)
+end
+
 def cmd_bump_version(argv)
   mode = argv.shift
   dir = argv.shift
@@ -386,6 +414,7 @@ COMMANDS = {
   "ai-notes" => method(:cmd_ai_notes),
   "notify" => method(:cmd_notify),
   "bump-version" => method(:cmd_bump_version),
+  "check-versions" => method(:cmd_check_versions),
   "notes-lint" => method(:cmd_notes_lint),
   "status" => method(:cmd_status),
   "config" => method(:cmd_config)
@@ -395,7 +424,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|notify|bump-version|notes-lint|status|config) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|notify|bump-version|check-versions|notes-lint|status|config) ..."
   exit 1
 end
 

@@ -12,6 +12,7 @@ class VersionsTest < Minitest::Test
 
   def teardown
     FileUtils.remove_entry(@dir)
+    FileUtils.remove_entry(@other_dir) if @other_dir
   end
 
   def android_fixture(version: "2.1.0")
@@ -87,6 +88,49 @@ class VersionsTest < Minitest::Test
     assert_raises(Train::Versions::Error) { Train::Versions.bump(@dir, "2.2") }
     assert_raises(Train::Versions::Error) { Train::Versions.bump(@dir, "vNext") }
     assert_raises(Train::Versions::Error) { Train::Versions.bump(@dir, "2.2.0-rc1") }
+  end
+
+  # ---- check_aligned: intra-repo (read) + cross-repo agreement ----
+
+  def other_dir
+    @other_dir ||= Dir.mktmpdir("train-versions-other-")
+  end
+
+  def android_fixture_in(dir, version:)
+    FileUtils.mkdir_p(File.join(dir, "android"))
+    File.write(File.join(dir, "android", "gradle.properties"), "VERSION_NAME=#{version}\n")
+  end
+
+  def test_check_aligned_passes_when_all_agree
+    android_fixture(version: "2.1.0")
+    android_fixture_in(other_dir, version: "2.1.0")
+    assert_equal "2.1.0",
+      Train::Versions.check_aligned("client" => @dir, "ios" => other_dir)
+  end
+
+  def test_check_aligned_fails_on_cross_repo_mismatch
+    android_fixture(version: "2.1.0")
+    android_fixture_in(other_dir, version: "2.2.0")
+    error = assert_raises(Train::Versions::Error) do
+      Train::Versions.check_aligned("client" => @dir, "ios" => other_dir)
+    end
+    assert_match(/app versions disagree/, error.message)
+    assert_match(/client: 2\.1\.0/, error.message)
+    assert_match(/ios: 2\.2\.0/, error.message)
+  end
+
+  def test_check_aligned_surfaces_intra_repo_split
+    # The ShareExtension-stuck-at-2.0.0 incident: one repo internally split.
+    ios_fixture(versions: %w[2.2.0 2.2.0 2.0.0])
+    android_fixture_in(other_dir, version: "2.2.0")
+    error = assert_raises(Train::Versions::Error) do
+      Train::Versions.check_aligned("ios" => @dir, "client" => other_dir)
+    end
+    assert_match(/inconsistent versions found/, error.message)
+  end
+
+  def test_check_aligned_rejects_empty
+    assert_raises(Train::Versions::Error) { Train::Versions.check_aligned({}) }
   end
 
   def test_no_known_layout_fails

@@ -1,0 +1,71 @@
+# Reusable version-alignment gate for the app repos. A PR against an app's
+# dev branch must (a) keep that repo's own marketing version internally
+# consistent — the ShareExtension-stuck-at-2.0.0 drift that aborted a cut
+# (convos-releases run 30039254203) — and (b) agree with the sibling app's
+# current dev version, mirroring Train::Cut#agree_on_version. Catching the
+# drift on the PR means the cut never has to.
+#
+# Runs `nix develop ./` on the CALLER's checkout (its flake.lock pins the
+# convos-releases `train` package), so this file only plumbs checkouts; all
+# logic lives in `train check-versions`.
+name: Check Versions (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      self-repo:
+        description: "OWNER/NAME of the app repo running this check (the PR's repo)"
+        required: true
+        type: string
+      sibling-repo:
+        description: "OWNER/NAME of the sibling app repo, compared at its dev HEAD"
+        required: true
+        type: string
+    secrets:
+      CACHIX_AUTH_TOKEN:
+        required: false
+
+jobs:
+  check-versions:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # self-repo at the PR head. submodules: the client carries convos-shared;
+      # harmless where there are none. Path keeps it clear of the sibling.
+      - name: Check out self repo (PR head)
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+          path: self
+
+      # Sibling repo at its live dev version. Both app repos are public, so no
+      # token is needed; a private repo would add a bot token here.
+      - name: Check out sibling repo (dev)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.sibling-repo }}
+          ref: dev
+          path: sibling
+          persist-credentials: false
+
+      - name: Set up Nix
+        # Qualified ref: reusable workflows resolve ./ against the CALLER, which
+        # has no setup-nix action of its own.
+        uses: xmtplabs/convos-releases/.github/actions/setup-nix@main
+        with:
+          sticky-disk: "true"
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Check versions align
+        env:
+          SELF_LABEL: ${{ inputs.self-repo }}
+          SIBLING_LABEL: ${{ inputs.sibling-repo }}
+        # `train` comes from self/flake's dev shell (convos-releases input).
+        # Paths are relative to the shell's cwd (self/), so the sibling is ../.
+        run: |
+          cd self
+          nix develop ./ --command train check-versions \
+            --dir "${SELF_LABEL}=." \
+            --dir "${SIBLING_LABEL}=../sibling"

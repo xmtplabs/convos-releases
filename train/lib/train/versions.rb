@@ -79,6 +79,24 @@ module Train
       version
     end
 
+    # check_aligned: assert every app checkout agrees on one marketing version.
+    # `dirs` is { label => dir }; reuses read() so an intra-repo split (the
+    # ShareExtension-stuck-at-2.0.0 incident) surfaces as that repo's own
+    # Error, and a cross-repo split (ios != client) as the mismatch below.
+    # Returns the agreed version on success. This is what the cut's
+    # agree_on_version guard enforces at cut time; running it on every app PR
+    # catches the drift before the cut instead of aborting it.
+    def check_aligned(dirs)
+      raise Error, "no directories to check" if dirs.empty?
+
+      seen = dirs.transform_values { |dir| read(dir) }
+      versions = seen.values.uniq
+      return versions.first if versions.size == 1
+
+      detail = seen.map { |label, v| "  #{label}: #{v}" }.join("\n")
+      raise Error, "app versions disagree:\n#{detail}"
+    end
+
     def bump(dir, new_version)
       unless new_version.match?(VERSION_RE)
         raise Error, "bad version '#{new_version}'"
