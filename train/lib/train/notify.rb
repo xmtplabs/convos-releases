@@ -60,7 +60,14 @@ module Train
         raise Error, "SLACK_BOT_TOKEN/SLACK_CHANNEL_APP not set"
       end
 
-      result = deliver(cut_text(version: version, kind: kind))
+      # deliver can raise raw network errors (ECONNREFUSED, SocketError,
+      # Net::OpenTimeout...); re-raise them as Notify::Error so the fail-loud
+      # contract holds — a caller rescuing Notify::Error must not leak these.
+      result = begin
+        deliver(cut_text(version: version, kind: kind))
+      rescue StandardError => e
+        raise Error, "Slack post to #{@channel} failed: #{e.class}: #{e.message}"
+      end
       return { channel: result[:channel], ts: result[:ts] } if result[:ok]
 
       hint = ERROR_HINTS[result[:error]]
