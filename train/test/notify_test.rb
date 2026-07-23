@@ -55,4 +55,55 @@ class NotifyTest < Minitest::Test
     assert_nil n.post_cut(version: "2.1.0", kind: "hotfix")
     assert_match(/warning: Slack notification failed/, @err.string)
   end
+
+  # ---- announce: the fail-loud manual path ----
+
+  def stub_deliver(n, result)
+    n.define_singleton_method(:deliver) { |_text| result }
+  end
+
+  def test_announce_returns_anchor_on_success
+    n = notify
+    stub_deliver(n, { ok: true, code: "200", error: nil, channel: "C0APP", ts: "1700000000.000100" })
+
+    assert_equal({ channel: "C0APP", ts: "1700000000.000100" },
+                 n.announce(version: "2.2.0", kind: "release"))
+  end
+
+  def test_announce_raises_with_actionable_hint_on_missing_scope
+    n = notify
+    stub_deliver(n, { ok: false, code: "200", error: "missing_scope", channel: nil, ts: nil })
+
+    error = assert_raises(Train::Notify::Error) { n.announce(version: "2.2.0", kind: "release") }
+    assert_match(/missing_scope/, error.message)
+    assert_match(/chat:write/, error.message)
+    assert_match(/REINSTALL/, error.message)
+  end
+
+  def test_announce_raises_with_actionable_hint_on_not_in_channel
+    n = notify
+    stub_deliver(n, { ok: false, code: "200", error: "not_in_channel", channel: nil, ts: nil })
+
+    error = assert_raises(Train::Notify::Error) { n.announce(version: "2.2.0", kind: "release") }
+    assert_match(/not_in_channel/, error.message)
+    assert_match(/invite/, error.message)
+    assert_match(/C0APP/, error.message)
+  end
+
+  def test_announce_passes_through_unknown_slack_errors
+    n = notify
+    stub_deliver(n, { ok: false, code: "200", error: "ratelimited", channel: nil, ts: nil })
+
+    error = assert_raises(Train::Notify::Error) { n.announce(version: "2.2.0", kind: "release") }
+    assert_match(/ratelimited/, error.message)
+  end
+
+  def test_announce_raises_when_token_or_channel_unset
+    assert_raises(Train::Notify::Error) do
+      notify(bot_token: nil).announce(version: "2.2.0", kind: "release")
+    end
+    assert_raises(Train::Notify::Error) do
+      notify(channel: nil).announce(version: "2.2.0", kind: "release")
+    end
+  end
 end
