@@ -158,11 +158,13 @@ def cmd_promote_record(argv)
 end
 
 def cmd_merge(argv)
-  opts = { dry_run: false, version: nil, actor: nil }
+  opts = { dry_run: false, version: nil, actor: nil, requested_by: nil, event_name: nil }
   OptionParser.new do |o|
-    o.banner = "Usage: train merge --version X.Y.Z --actor LOGIN [--dry-run]"
+    o.banner = "Usage: train merge --version X.Y.Z --actor LOGIN [--requested-by ID] [--event-name NAME] [--dry-run]"
     o.on("--version VERSION") { |v| opts[:version] = v }
     o.on("--actor LOGIN") { |v| opts[:actor] = v }
+    o.on("--requested-by ID") { |v| opts[:requested_by] = v }
+    o.on("--event-name NAME") { |v| opts[:event_name] = v }
     o.on("--dry-run") { opts[:dry_run] = true }
   end.parse!(argv)
 
@@ -172,7 +174,10 @@ def cmd_merge(argv)
 
   github = Train::Github.new(dry_run: opts[:dry_run])
   merge = Train::Merge.new(github: github)
-  unwrap_result(merge.run(version: opts[:version], actor: opts[:actor]))
+  unwrap_result(merge.run(
+    version: opts[:version], actor: opts[:actor],
+    event_name: opts[:event_name], requested_by: opts[:requested_by]
+  ))
 end
 
 def cmd_seed_notes(argv)

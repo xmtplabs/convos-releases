@@ -15,6 +15,10 @@ on:
         description: GitHub login requesting the merge (permission-gated)
         type: string
         required: true
+      requested-by:
+        description: "Operator identity (email/login) requesting the merge — log-only attribution"
+        type: string
+        default: ""
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -29,9 +33,13 @@ on:
         type: string
         required: true
       actor:
-        description: GitHub login requesting the merge (permission-gated)
+        description: Dispatcher login — must equal github.actor (the dashboard's actor bot on the dashboard path); asserts channel provenance, not permission
         type: string
         required: true
+      requested-by:
+        description: "Operator identity (email/login) requesting the merge — log-only attribution"
+        type: string
+        default: ""
 
 jobs:
   merge:
@@ -47,9 +55,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      # workflow_call callers (conductor-merge.yml) pass the authenticated
-      # commenter; only the direct workflow_dispatch path can forge actor,
-      # so bind it to github.actor there.
+      # On workflow_dispatch, github.actor is whoever authenticated the
+      # dispatch. When the release dashboard dispatches via its actor app,
+      # that's release-control-dashboard[bot] (the app's slug + [bot]; the app
+      # is *named* convos-dashboard-actor but its slug differs) — so
+      # inputs.actor == github.actor asserts the dispatch genuinely came through
+      # the dashboard's actor app (channel provenance), not that a human proved
+      # their identity. Train::Merge additionally requires that actor to equal
+      # the bot before it skips the per-repo write gate. workflow_call callers
+      # (conductor-merge.yml) pass the authenticated commenter and never run
+      # this step.
       - name: Verify dispatch actor
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -97,5 +112,8 @@ jobs:
           GH_TOKEN: ${{ steps.bot.outputs.token }}
           TRAIN_VERSION: ${{ inputs.version }}
           TRAIN_ACTOR: ${{ inputs.actor }}
+          TRAIN_REQUESTED_BY: ${{ inputs.requested-by || '' }}
+          TRAIN_EVENT_NAME: ${{ github.event_name }}
         run: |
-          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR"
+          train merge --version "$TRAIN_VERSION" --actor "$TRAIN_ACTOR" \
+            --requested-by "$TRAIN_REQUESTED_BY" --event-name "$TRAIN_EVENT_NAME"
