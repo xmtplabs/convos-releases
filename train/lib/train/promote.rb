@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "uri"
 require "dry/monads"
 require_relative "manifest"
 require_relative "state_writer"
@@ -88,7 +89,11 @@ module Train
       # Back-merge BEFORE the manifest write: a hard failure here must leave
       # the manifest untouched rather than record a promotion whose back-merge
       # never happened. Rerun cases are tolerated (see the method).
-      yield open_hotfix_back_merge_pr(repo: repo, version: version) if kind == "hotfix"
+      if kind == "hotfix"
+        yield open_back_merge_pr(repo: repo, version: version, kind: kind)
+      elsif kind == "release"
+        yield ensure_release_back_merge(repo: repo, version: version, app_dir: app_dir)
+      end
 
       yield record_promotion(repo: repo, version: version, key: key, value: value_str, tag: tag, notes_sha: notes_sha, run_url: run_url)
 
@@ -139,27 +144,141 @@ module Train
       "no commits between"
     ].freeze
 
+
     # Hard-gated: a genuine API failure returns Failure and aborts record
     # before the manifest is written; only the two tolerated errors above
     # become a Success note. The branch is restored first if absent —
     # delete-branch-on-merge removes it, and a PR can't open from a deleted head.
-    def open_hotfix_back_merge_pr(repo:, version:)
-      branch = "hotfix/#{version}"
+    # kind is "hotfix" or "release" — same machinery, different branch prefix.
+    def open_back_merge_pr(repo:, version:, kind:)
+      branch = "#{kind}/#{version}"
       yield restore_branch_if_deleted(repo: repo, branch: branch)
 
       @gh.pr_create(
         repo: repo, base: "dev", head: branch,
-        title: "Back-merge hotfix #{version} into dev",
-        body: "Automated back-merge of hotfix/#{version} into dev. Conflicts? Resolve them here manually."
+        title: "Back-merge #{kind} #{version} into dev",
+        body: "Automated back-merge of #{branch} into dev. Conflicts? Resolve them here manually."
       )
       Success(:ok)
     rescue Github::ApiError => e
       if TOLERATED_BACK_MERGE_ERRORS.any? { |m| e.message.downcase.include?(m) }
-        @out.puts "train: back-merge for #{repo}@hotfix/#{version}: #{e.message} (tolerated)"
+        @out.puts "train: back-merge for #{repo}@#{branch}: #{e.message} (tolerated)"
         return Success(:ok)
       end
 
-      Failure("hotfix back-merge PR failed for #{repo}: #{e.message}")
+      Failure("#{kind} back-merge PR failed for #{repo}: #{e.message}")
+    end
+
+    # Release counterpart to the always-on hotfix back-merge. Runs the
+    # divergence+author gate, and opens the PR (restoring the merge-deleted
+    # branch first, inside open_back_merge_pr) ONLY when a non-bot commit
+    # diverged — a clean/bot-only release is never resurrected. EVERY git/API
+    # step must become a hard Failure, never an escaped exception (binding
+    # constraint: aborts record, manifest untouched; the caller only handles the
+    # Result contract), so the whole body sits inside one rescue.
+    def ensure_release_back_merge(repo:, version:, app_dir:)
+      return Success(:ok) unless release_needs_back_merge?(repo: repo, dir: app_dir, version: version)
+
+      open_back_merge_pr(repo: repo, version: version, kind: "release")
+    rescue Github::ApiError, Github::CommandError => e
+      Failure("release back-merge check failed for #{repo}: #{e.message}")
+    end
+
+    # True only if a NON-bot commit on release/<version> is missing from dev.
+    # SHAs come from the GitHub API on `repo` (dev tip via ls_remote; release tip
+    # via ls_remote, falling back to the merged PR's recorded head-sha when the
+    # branch was already deleted on merge) — so the decision never depends on
+    # app_dir's remote identity or on the release branch still existing, and
+    # never mutates anything (dry-run safe, no branch resurrection).
+    #
+    # The author list is computed locally in `dir` (the app-repo checkout record
+    # already holds): we fetch the two concrete SHAs — always valid commits, so
+    # this works even if the branch ref is gone — then `git log dev..tip`. We do
+    # NOT gate on `ancestor?` (it swallows git errors as false); `commit_authors`
+    # uses `run!`, so any bad ref RAISES and the caller turns it into a hard
+    # Failure (fail loud, not fail open).
+    def release_needs_back_merge?(repo:, dir:, version:)
+      # `--repo` and `--app-dir` arrive independently on record; the SHAs below
+      # come from `dir`'s origin while the PR is opened on `repo`, so confirm the
+      # checkout actually IS `repo` first — else a miswired manual run would
+      # inspect one repo and open/skip a back-merge in another.
+      assert_checkout_is(repo: repo, dir: dir)
+
+      dev_sha = @gh.ls_remote(dir, "refs/heads/dev")
+      # A missing dev is an anomaly, not "nothing to do" — fail loud rather than
+      # silently skip a back-merge that we simply couldn't evaluate.
+      raise Github::ApiError, "no dev branch on #{repo} — cannot evaluate back-merge" if dev_sha.to_s.empty?
+
+      release_tip = release_tip_sha(repo: repo, dir: dir, version: version)
+      # Empty tip is legitimate: no release branch AND no merged PR -> nothing to
+      # back-merge (e.g. a manual promote of a never-branched version).
+      return false if release_tip.to_s.empty?
+
+      # Bring both concrete commits into the local checkout so `git log dev..tip`
+      # resolves even if the release branch ref itself is gone (deleted on merge).
+      @gh.fetch(dir, dev_sha)
+      @gh.fetch(dir, release_tip)
+
+      authors = @gh.commit_authors(dir, "#{dev_sha}..#{release_tip}")
+      authors.any? { |email| email != Github::BOT_AUTHOR_EMAIL }
+    end
+
+    # The release branch tip on origin, or the merged PR's head-sha if the
+    # branch was deleted on merge; "" if neither exists (nothing to back-merge).
+    def release_tip_sha(repo:, dir:, version:)
+      tip = @gh.ls_remote(dir, "refs/heads/release/#{version}")
+      return tip unless tip.to_s.empty?
+
+      merged_pr_head_sha(repo: repo, branch: "release/#{version}")
+    end
+
+    # Fail loud if `dir`'s origin is not the repo we're promoting. Compares the
+    # parsed "owner/name" path exactly (both https and scp-like ssh URLs, with or
+    # without a trailing .git) — a substring check would accept sibling repos
+    # like "<repo>-fork".
+    def assert_checkout_is(repo:, dir:)
+      origin = @gh.remote_url(dir)
+      return if origin_slug(origin) == repo
+
+      raise Github::ApiError, "app-dir #{dir} (origin #{origin}) is not a checkout of #{repo}"
+    end
+
+    # "owner/name" iff `url` is a github.com origin (https, ssh://, or scp-like
+    # git@github.com:owner/name), else nil. Parses the URL and compares the HOST
+    # to "github.com" EXACTLY — a substring/regex approach lets impostor hosts
+    # through (notgithub.com, gitlab.com/github.com/...), which would satisfy the
+    # checkout-identity guard and let the gate read the wrong repo's commits.
+    def origin_slug(url)
+      url = url.to_s.strip
+      # scp-like "git@github.com:owner/name" has no "://" and uses ":" for the path.
+      if !url.include?("://") && (m = url.match(%r{\A(?:[^@]+@)?(?<host>[^/:]+):(?<path>.+)\z}))
+        host, path = m[:host], m[:path]
+      else
+        uri = begin
+          URI.parse(url)
+        rescue URI::InvalidURIError
+          nil
+        end
+        return nil unless uri&.host && uri.path
+
+        host = uri.host
+        path = uri.path.sub(%r{\A/}, "")
+      end
+      return nil unless host == "github.com"
+
+      slug = path.sub(%r{\.git/?\z}, "").sub(%r{/\z}, "")
+      slug.match?(%r{\A[^/]+/[^/]+\z}) ? slug : nil
+    end
+
+    # The head-sha of the LAST-merged PR from `branch` into main (max merged_at),
+    # or "" if none. GitHub lists PRs newest-CREATED first, so `.find`/`.first`
+    # can pick a stale reopened/superseded PR; select by merge time instead.
+    # Shared by the release back-merge tip lookup and restore_branch_if_deleted.
+    def merged_pr_head_sha(repo:, branch:)
+      merged = @gh.pr_list(repo: repo, head: branch, base: "main", state: "all")
+                  .select { |pr| pr["merged_at"] }
+                  .max_by { |pr| pr["merged_at"] }
+      merged ? merged["head-sha"].to_s : ""
     end
 
     # Recreate hotfix/<version> at the merged PR's recorded head sha — the
@@ -167,13 +286,13 @@ module Train
     def restore_branch_if_deleted(repo:, branch:)
       return Success(:ok) if @gh.branch_exists?(repo, branch)
 
-      merged = @gh.pr_list(repo: repo, head: branch, base: "main", state: "all").find { |pr| pr["merged_at"] }
-      unless merged && merged["head-sha"]
+      head_sha = merged_pr_head_sha(repo: repo, branch: branch)
+      if head_sha.empty?
         return Failure("#{branch} is gone on #{repo} and no merged PR records its head sha — restore the branch manually, then re-run")
       end
 
-      @gh.create_ref(repo, branch: branch, sha: merged["head-sha"])
-      @out.puts "#{repo}: restored #{branch} @ #{merged["head-sha"]} (deleted on merge)"
+      @gh.create_ref(repo, branch: branch, sha: head_sha)
+      @out.puts "#{repo}: restored #{branch} @ #{head_sha} (deleted on merge)"
       Success(:ok)
     end
 

@@ -43,6 +43,12 @@ module Train
       end
     end
 
+    # The identity every train-made commit is authored as (see git_config_bot).
+    # Single source of truth so the back-merge gate can recognize train's own
+    # commits without a second, drift-prone copy of the literal.
+    BOT_AUTHOR_NAME = "convos-conductor"
+    BOT_AUTHOR_EMAIL = "convos-conductor[bot]@users.noreply.github.com"
+
     attr_reader :dry_run
 
     # client: optional Octokit::Client (or test double) injection point.
@@ -93,6 +99,24 @@ module Train
     def ancestor?(dir, ancestor, descendant)
       _out, _err, status = run(["git", "-C", dir, "merge-base", "--is-ancestor", ancestor, descendant])
       status.success?
+    end
+
+    # Author emails (%ae) of the commits in `range` (e.g. "dev..release/2.2.0"),
+    # one line per commit in git-log order. Empty range -> []. Read-only.
+    # NB: lines(chomp: true), NOT split("\n") — split drops a *trailing* empty
+    # field, so a sole empty-`%ae` commit ("\n") would collapse to [] and vanish;
+    # lines keeps it as [""]. An empty/malformed author must survive so it counts
+    # as a distinct (non-bot) author and forces a back-merge. Do NOT reject-empty.
+    def commit_authors(dir, range)
+      out, = run!(["git", "-C", dir, "log", "--format=%ae", range])
+      out.lines(chomp: true)
+    end
+
+    # The origin remote URL of a local checkout (https or scp-like ssh). Read-only;
+    # used to confirm a checkout belongs to the repo we think it does.
+    def remote_url(dir)
+      out, = run!(["git", "-C", dir, "remote", "get-url", "origin"])
+      out.strip
     end
 
     def clone(url, dest, depth: nil, filter: nil)
@@ -237,8 +261,8 @@ module Train
 
     def git_config_bot(dir)
       mutate!("git config user.name/email (#{dir})") do
-        run!(["git", "-C", dir, "config", "user.name", "convos-conductor"])
-        run!(["git", "-C", dir, "config", "user.email", "convos-conductor[bot]@users.noreply.github.com"])
+        run!(["git", "-C", dir, "config", "user.name", BOT_AUTHOR_NAME])
+        run!(["git", "-C", dir, "config", "user.email", BOT_AUTHOR_EMAIL])
       end
     end
 

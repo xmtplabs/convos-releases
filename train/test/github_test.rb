@@ -2,6 +2,8 @@
 
 require_relative "test_helper"
 require "train/github"
+require "tmpdir"
+require "fileutils"
 # octokit up-front: release_exists? tests need the fake to raise REAL
 # Octokit exception classes (NotFound vs InternalServerError) so the
 # rescue hierarchy in Github#release_exists? is exercised for real.
@@ -597,5 +599,60 @@ class GithubTest < Minitest::Test
     assert_equal true, result
     assert_nil client.instance_variable_get(:@last_merge)
     assert_match(/\[dry-run\] merge o\/r#5/, @out.string)
+  end
+
+  def test_commit_authors_lists_author_emails_in_range
+    dir = Dir.mktmpdir("gh-authors-")
+    system("git", "-C", dir, "init", "--quiet", exception: true)
+    system("git", "-C", dir, "config", "user.email", "base@example.com", exception: true)
+    system("git", "-C", dir, "config", "user.name", "Base", exception: true)
+    File.write(File.join(dir, "a"), "1")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "base", exception: true)
+    base = `git -C #{dir} rev-parse HEAD`.strip
+
+    system("git", "-C", dir, "config", "user.email", "human@example.com", exception: true)
+    File.write(File.join(dir, "b"), "2")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "fix", exception: true)
+
+    gh = Train::Github.new
+    assert_equal ["human@example.com"], gh.commit_authors(dir, "#{base}..HEAD")
+    assert_empty gh.commit_authors(dir, "HEAD..HEAD")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_commit_authors_preserves_an_empty_author_email
+    dir = Dir.mktmpdir("gh-authors-empty-")
+    system("git", "-C", dir, "init", "--quiet", exception: true)
+    system("git", "-C", dir, "config", "user.name", "Base", exception: true)
+    system("git", "-C", dir, "config", "user.email", "base@example.com", exception: true)
+    File.write(File.join(dir, "a"), "1")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "base", exception: true)
+    base = `git -C #{dir} rev-parse HEAD`.strip
+
+    # --author with an empty email is the deterministic way to force %ae="".
+    # It must survive as "" so the back-merge gate counts it as a non-bot author.
+    system("git", "-C", dir, "commit", "--quiet", "--allow-empty",
+           "--author=Nobody <>", "-m", "empty-author", exception: true)
+
+    gh = Train::Github.new
+    assert_equal [""], gh.commit_authors(dir, "#{base}..HEAD")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_remote_url_returns_origin_url
+    dir = Dir.mktmpdir("gh-remote-")
+    system("git", "-C", dir, "init", "--quiet", exception: true)
+    system("git", "-C", dir, "remote", "add", "origin",
+           "https://github.com/xmtplabs/convos-ios.git", exception: true)
+
+    gh = Train::Github.new
+    assert_equal "https://github.com/xmtplabs/convos-ios.git", gh.remote_url(dir)
+  ensure
+    FileUtils.remove_entry(dir) if dir
   end
 end
