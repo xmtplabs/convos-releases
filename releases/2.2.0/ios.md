@@ -1,2 +1,2 @@
-- The heaviest Convos users can now enjoy even snappier messaging
+- Snappier messaging for y'all with many many messages
 - Bug fixes and performance improvements
