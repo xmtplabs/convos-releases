@@ -1,2 +1,3 @@
+- Share from anywhere! Share pics, links, or screenshots into Convos with the Share button in any app
 - Snappier messaging for y'all with many many messages
 - Bug fixes and performance improvements
