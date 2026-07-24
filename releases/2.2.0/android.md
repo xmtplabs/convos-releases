@@ -1,3 +1,3 @@
-- Share from anywhere! Share pics, links, or screenshots into Convos using any app's Share button
+- Share from anywhere! Share pics, links, or screenshots into Convos with the Share button in any app
 - Leave groups that you created! Byeeee
 - Bug fixes and performance improvements
