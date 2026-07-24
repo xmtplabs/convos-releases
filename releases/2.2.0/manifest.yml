@@ -25,3 +25,6 @@ repos:
     - sha: 36e66d67445e915b4bacc2dd88bdc34294d3a5cf
       run: https://github.com/xmtplabs/convos-client/actions/runs/30040948183
       version-code: 29747289
+    - sha: 44e529f7493a5eb5dd3fa7000195c7379bb1c935
+      run: https://github.com/xmtplabs/convos-client/actions/runs/30117022686
+      version-code: 29748627
