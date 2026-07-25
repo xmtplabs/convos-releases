@@ -1,0 +1,38 @@
+# Side-effect-free target for the dashboard's PING button: exercises the
+# full Access → actor-app → workflow_dispatch chain (the SHIP path) without
+# touching anything. The echoed github.actor is the auth evidence — on a
+# dashboard dispatch it must read release-control-dashboard[bot].
+name: Dashboard Ping
+run-name: "Dashboard Ping (${{ inputs.requested-by || 'unattributed' }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      requested-by:
+        description: "Operator identity (email/login) — log-only attribution"
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  ping:
+    name: Ping
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # Inputs flow through env vars, not inline ${{ }} — requested-by is
+      # externally influenced text.
+      - name: Echo provenance
+        env:
+          ACTOR: ${{ github.actor }}
+          EVENT: ${{ github.event_name }}
+          REQUESTED_BY: ${{ inputs.requested-by }}
+        run: |
+          echo "actor=$ACTOR"
+          echo "event=$EVENT"
+          echo "requested-by=$REQUESTED_BY"
+      - name: Simulate work
+        run: sleep 10
+      - name: Done
+        run: echo "pong"
