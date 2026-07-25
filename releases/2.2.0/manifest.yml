@@ -17,7 +17,7 @@ repos:
   xmtplabs/convos-client:
     source-sha: 72f8dbba71bd01657b117f8278c0e0fc0ead3898
     release-branch: release/2.2.0
-    status: rc-available
+    status: promoted
     rc:
     - sha: 72f8dbba71bd01657b117f8278c0e0fc0ead3898
       run: https://github.com/xmtplabs/convos-client/actions/runs/30040092607
@@ -34,3 +34,8 @@ repos:
     - sha: 114bea139d111dfe8f1d96f0cd0c9d4172fea001
       run: https://github.com/xmtplabs/convos-client/actions/runs/30118395193
       version-code: 29748649
+    promoted:
+      version-code: 29748649
+      tag: v2.2.0
+      notes-sha: a52ec2c6f700f87887f8f611197b65f9cd07427b
+      run: https://github.com/xmtplabs/convos-client/actions/runs/30135391619
