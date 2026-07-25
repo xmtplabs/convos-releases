@@ -24,6 +24,14 @@ on:
     secrets:
       CACHIX_AUTH_TOKEN:
         required: false
+      # The sibling app repo may be private (convos-client is), so its checkout
+      # needs a token that can read it. The default GITHUB_TOKEN is scoped to the
+      # caller repo only. Callers pass these via `secrets: inherit` (org secrets
+      # scoped to the three release repos).
+      RELEASES_BOT_APP_ID:
+        required: true
+      RELEASES_BOT_PRIVATE_KEY:
+        required: true
 
 jobs:
   check-versions:
@@ -40,14 +48,36 @@ jobs:
           submodules: true
           path: self
 
-      # Sibling repo at its live dev version. Both app repos are public, so no
-      # token is needed; a private repo would add a bot token here.
+      # The sibling app repo can be private (convos-client is), and the default
+      # GITHUB_TOKEN only grants access to the CALLER repo — so checking the
+      # sibling out with it fails "Repository not found". Mint a conductor-App
+      # token scoped to the sibling (read-only clone) instead.
+      #
+      # create-github-app-token's `repositories` wants the bare repo NAME, not
+      # OWNER/NAME; strip the owner from sibling-repo.
+      - name: Resolve sibling repo name
+        id: sibling
+        env:
+          SIBLING_REPO: ${{ inputs.sibling-repo }}
+        run: echo "name=${SIBLING_REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint bot token for sibling checkout
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASES_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.sibling.outputs.name }}
+
+      # Sibling repo at its live dev version, read via the bot token.
       - name: Check out sibling repo (dev)
         uses: actions/checkout@v6
         with:
           repository: ${{ inputs.sibling-repo }}
           ref: dev
           path: sibling
+          token: ${{ steps.bot.outputs.token }}
           persist-credentials: false
 
       - name: Set up Nix
