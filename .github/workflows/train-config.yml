@@ -2,6 +2,7 @@
 # date). All logic lives in Train::ConfigEdit; this only plumbs
 # credentials and inputs. Two clicks serialize via the concurrency group.
 name: Train Config
+run-name: "Train Config (skip ${{ inputs.add-skip-date }} · ${{ inputs.requested-by || 'unattributed' }})"
 
 on:
   workflow_dispatch:

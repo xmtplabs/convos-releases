@@ -3,6 +3,10 @@
 # ensure-state, so re-dispatching converges. All logic lives in Train::Cut;
 # this only plumbs credentials and the trigger context.
 name: Release Cut
+# Distinct run titles per intent: hotfix cuts and forced cuts both dispatch
+# THIS file, and the dashboard's ticket screen resolves "the newest run" —
+# a labeled title is the operator's tell when two dispatches race.
+run-name: "Release Cut (${{ inputs.hotfix-base-tag || (inputs.schedule && 'scheduled') || 'forced' }} · ${{ inputs.requested-by || 'cron' }})"
 
 # The weekly trigger is the cut-cron Cloudflare Worker (workers/cut-cron):
 # GitHub's own schedule trigger lags 15-25 minutes, and keeping it alongside

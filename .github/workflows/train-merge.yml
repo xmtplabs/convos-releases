@@ -3,6 +3,7 @@
 # through so Train::Merge can re-verify write access before merging. All
 # merge logic lives in the tested `train` CLI; this only plumbs credentials.
 name: Train Merge (reusable)
+run-name: "Train Merge ${{ inputs.version }}"
 
 on:
   workflow_call:
