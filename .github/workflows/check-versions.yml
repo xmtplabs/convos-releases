@@ -28,10 +28,17 @@ on:
       # needs a token that can read it. The default GITHUB_TOKEN is scoped to the
       # caller repo only. Callers pass these via `secrets: inherit` (org secrets
       # scoped to the three release repos).
+      #
+      # required: false ON PURPOSE — GitHub withholds Actions secrets from fork
+      # and Dependabot PR contexts, and a required-but-unsupplied secret rejects
+      # the whole workflow_call before any job runs. Keeping them optional lets
+      # the check still run there (public-sibling or intra-repo); the sibling
+      # checkout below falls back to the default GITHUB_TOKEN when the bot token
+      # can't be minted.
       RELEASES_BOT_APP_ID:
-        required: true
+        required: false
       RELEASES_BOT_PRIVATE_KEY:
-        required: true
+        required: false
 
 jobs:
   check-versions:
@@ -39,6 +46,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      # `secrets` can't be used in a step `if:`, so surface presence via env
+      # (which can). Empty on fork/Dependabot PRs, where secrets are withheld.
+      HAS_BOT_SECRETS: ${{ secrets.RELEASES_BOT_APP_ID != '' && secrets.RELEASES_BOT_PRIVATE_KEY != '' }}
     steps:
       # self-repo at the PR head. submodules: the client carries convos-shared;
       # harmless where there are none. Path keeps it clear of the sibling.
@@ -61,8 +72,12 @@ jobs:
           SIBLING_REPO: ${{ inputs.sibling-repo }}
         run: echo "name=${SIBLING_REPO##*/}" >> "$GITHUB_OUTPUT"
 
+      # Skipped when the bot secrets are absent (fork/Dependabot PRs) — the
+      # checkout then falls back to the default GITHUB_TOKEN, which still works
+      # for a public sibling.
       - name: Mint bot token for sibling checkout
         id: bot
+        if: ${{ env.HAS_BOT_SECRETS == 'true' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
@@ -70,14 +85,17 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ steps.sibling.outputs.name }}
 
-      # Sibling repo at its live dev version, read via the bot token.
+      # Sibling repo at its live dev version. Prefer the bot token (reads a
+      # private sibling); fall back to the default GITHUB_TOKEN when it wasn't
+      # minted — a public sibling still clones, a private one can't be read
+      # without a token (inherent, not a regression).
       - name: Check out sibling repo (dev)
         uses: actions/checkout@v6
         with:
           repository: ${{ inputs.sibling-repo }}
           ref: dev
           path: sibling
-          token: ${{ steps.bot.outputs.token }}
+          token: ${{ steps.bot.outputs.token || github.token }}
           persist-credentials: false
 
       - name: Set up Nix
