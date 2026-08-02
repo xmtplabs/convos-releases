@@ -26,6 +26,9 @@ repos:
     - sha: e1232e151cbcd019e48787373d737e2bba9cc604
       run: https://github.com/xmtplabs/convos-ios/actions/runs/30670620750
       build-number: 1216
+    - sha: e1232e151cbcd019e48787373d737e2bba9cc604
+      run: https://github.com/xmtplabs/convos-ios/actions/runs/30771272397
+      build-number: 1219
     promoted:
       build-number: 1216
       tag: v2.3.0
