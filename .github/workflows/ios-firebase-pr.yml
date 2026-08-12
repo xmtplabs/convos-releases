@@ -49,7 +49,10 @@ jobs:
   firebase_pr:
     name: Build & upload to Firebase App Distribution
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 25
+    # SPM's clone of xmtp/libxmtp (~2 GiB of history) normally takes under a
+    # minute but has been observed at 17-23 minutes when GitHub's pack
+    # generation is slow. 40 leaves headroom for a cold cache on a bad day.
+    timeout-minutes: 40
     permissions:
       id-token: write
       contents: read
@@ -65,6 +68,26 @@ jobs:
           token: ${{ secrets.CONVOS_CERTIFICATES_TOKEN }}
           path: convos-certificates
           persist-credentials: false
+
+      # Bare git clones of every SPM dependency; libxmtp alone is ~2 GiB, and
+      # fetching it cold is the slowest and flakiest part of this job. The
+      # prefix fallback lets a dependency bump reuse existing history and
+      # fetch only the delta. These caches are branch-scoped, so convos-ios's
+      # warm-xcode-cache workflow seeds the key on the default branch.
+      #
+      # Saving is `post-if: success()` inside the action, which is what we
+      # want: a job killed mid-fetch must not publish a half-cloned directory.
+      #
+      # Gated because `runner` is a caller input and this action is Warp-only.
+      # Missing the cache costs a slow clone, not a failed job.
+      - name: Restore SPM package clones
+        if: startsWith(inputs.runner, 'warp-')
+        uses: WarpBuilds/cache@v1
+        with:
+          path: .spm-clones
+          key: spm-clones-${{ hashFiles('**/Package.resolved') }}
+          restore-keys: |
+            spm-clones-
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v33
@@ -108,6 +131,10 @@ jobs:
 
       - name: Run fastlane firebase_pr
         env:
+          # gym reads this as cloned_source_packages_path and passes
+          # -clonedSourcePackagesDirPath to both -resolvePackageDependencies
+          # and the archive build, pointing SPM at the cache restored above.
+          GYM_CLONED_SOURCE_PACKAGES_PATH: ${{ github.workspace }}/.spm-clones
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           # CI uses local match checkout; local dev uses SSH (Matchfile default).
           MATCH_GIT_URL: ${{ github.workspace }}/convos-certificates
