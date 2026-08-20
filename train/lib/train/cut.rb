@@ -47,6 +47,7 @@ module Train
       work = Dir.mktmpdir("train-cut-")
       begin
         captures = capture_repos(work)
+        yield guard_ancestry(work)
         version = yield agree_on_version(captures)
         version = yield reconcile_in_flight(version, today)
 
@@ -141,6 +142,24 @@ module Train
         @out.puts "#{repo} dev=#{repo_sha} version=#{repo_ver}"
         [repo, { sha: repo_sha, version: repo_ver }]
       end
+    end
+
+    # A squashed back-merge leaves main with content dev never absorbed, and
+    # every later release PR conflicts (the 2.3.0/2.5.0 incident). A conflict
+    # probe, not an ancestor check: main's release merges are never in dev.
+    def guard_ancestry(work)
+      diverged = REPOS.select do |repo|
+        dir = File.join(work, repo.split("/").last)
+        @gh.merge_conflicts?(dir, "origin/dev", "origin/main")
+      end
+      return Success(:ok) if diverged.empty?
+
+      messages = diverged.map do |repo|
+        "#{repo}: merging main into dev would conflict — a back-merge was skipped or squash-merged; true-merge main into dev, then retry the cut"
+      end
+      Failure(messages.join("; "))
+    rescue Github::CommandError => e
+      Failure("could not evaluate main/dev mergeability: #{e.message}")
     end
 
     def agree_on_version(captures)

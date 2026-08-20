@@ -95,7 +95,10 @@ class FakeOctokitClient
     @graphql_results_queue = results
   end
 
+  attr_reader :last_pull_requests_options
+
   def pull_requests(repo, options = {})
+    @last_pull_requests_options = options
     @pull_requests[[repo, options[:head], options[:state] || "open"]]
   end
 
@@ -237,14 +240,14 @@ class GithubTest < Minitest::Test
 
   # ---- pr_create ----
 
-  def test_pr_create_calls_octokit_and_returns_nil
+  def test_pr_create_calls_octokit_and_returns_the_pr_number
     client = FakeOctokitClient.new
     client.stub_create_pull_request({ number: 7, html_url: "https://github.com/o/r/pull/7" })
     gh = Train::Github.new(client: client)
 
     result = gh.pr_create(repo: "o/r", base: "main", head: "feat", title: "t", body: "b")
 
-    assert_nil result
+    assert_equal 7, result
   end
 
   # ---- release_exists?: NotFound → false, other errors → ApiError ----
@@ -362,6 +365,41 @@ class GithubTest < Minitest::Test
     assert_includes client.posts[1][:body], "mergeMethod: MERGE"
   end
 
+  def test_pr_merge_auto_with_pinned_methods_only_attempts_those
+    # The back-merge PR pins ["MERGE"]; SQUASH must never be attempted.
+    client = FakeOctokitClient.new
+    client.stub_pull_requests(
+      repo: "o/r", head: "o:release/2.5.0", state: "open",
+      result: [{ number: 9, node_id: "PR_kwabc", html_url: "x" }]
+    )
+    client.stub_graphql_result({ data: { enablePullRequestAutoMerge: { pullRequest: { id: "PR_kwabc" } } } })
+    gh = Train::Github.new(client: client)
+
+    ok = gh.pr_merge_auto(repo: "o/r", head_or_number: "release/2.5.0", methods: ["MERGE"])
+
+    assert_equal true, ok
+    assert_equal 1, client.posts.size
+    assert_includes client.posts.first[:body], "mergeMethod: MERGE"
+    refute_includes client.posts.first[:body], "SQUASH"
+  end
+
+  def test_pr_merge_auto_branch_resolution_pins_the_base_when_given
+    # A head can have open PRs against several bases (release/x.y.z -> main
+    # AND -> dev); arming by branch must never resolve a sibling PR.
+    client = FakeOctokitClient.new
+    client.stub_pull_requests(
+      repo: "o/r", head: "o:release/2.5.0", state: "open",
+      result: [{ number: 9, node_id: "PR_kwabc", html_url: "x" }]
+    )
+    client.stub_graphql_result({ data: { enablePullRequestAutoMerge: { pullRequest: { id: "PR_kwabc" } } } })
+    gh = Train::Github.new(client: client)
+
+    ok = gh.pr_merge_auto(repo: "o/r", head_or_number: "release/2.5.0", methods: ["MERGE"], base: "dev")
+
+    assert_equal true, ok
+    assert_equal "dev", client.last_pull_requests_options[:base]
+  end
+
   def test_pr_merge_auto_merges_directly_when_pr_is_already_clean
     # Live 2.1.0 finding: GitHub refuses to ARM auto-merge on a PR whose
     # checks already pass ("clean status") — the tool must merge directly
@@ -386,6 +424,84 @@ class GithubTest < Minitest::Test
       client.instance_variable_get(:@last_merge)
     )
     assert_match(/already mergeable — merged directly \(MERGE\)/, @out.string)
+  end
+
+  # ---- ancestor?: exit 1 is "no", exit > 1 is an operational failure ----
+
+  FakeExitStatus = Struct.new(:exitstatus) do
+    def success?
+      exitstatus.zero?
+    end
+  end
+  private_constant :FakeExitStatus
+
+  def stub_git_status(gh, exitstatus, stdout: "", stderr: "")
+    gh.define_singleton_method(:run) { |_args| [stdout, stderr, FakeExitStatus.new(exitstatus)] }
+  end
+
+  def test_ancestor_true_on_exit_zero
+    gh = Train::Github.new
+    stub_git_status(gh, 0)
+
+    assert_equal true, gh.ancestor?("/tmp/dir", "origin/main", "origin/dev")
+  end
+
+  def test_ancestor_false_on_exit_one
+    gh = Train::Github.new
+    stub_git_status(gh, 1)
+
+    assert_equal false, gh.ancestor?("/tmp/dir", "origin/main", "origin/dev")
+  end
+
+  # ---- merge_conflicts?: merge-tree exit-code mapping ----
+
+  def test_merge_conflicts_false_on_clean_merge
+    gh = Train::Github.new
+    stub_git_status(gh, 0)
+
+    assert_equal false, gh.merge_conflicts?("/tmp/dir", "origin/dev", "origin/main")
+  end
+
+  def test_merge_conflicts_true_on_exit_one_with_written_tree
+    gh = Train::Github.new
+    # A conflicted --write-tree run exits 1 but still writes the toplevel
+    # tree oid (plus conflict details) to stdout.
+    stub_git_status(gh, 1, stdout: "3fa9c1d2e3\n\nCONFLICT (content): Merge conflict in a.rb\n")
+
+    assert_equal true, gh.merge_conflicts?("/tmp/dir", "origin/dev", "origin/main")
+  end
+
+  def test_merge_conflicts_raises_on_exit_one_refusal_with_no_tree
+    # git also exits 1 for refusals like a bad ref, distinguished only by
+    # the empty stdout — that must raise, not read as a conflict verdict.
+    gh = Train::Github.new
+    stub_git_status(gh, 1, stderr: "merge-tree: origin/nonexistent - not something we can merge")
+
+    error = assert_raises(Train::Github::CommandError) do
+      gh.merge_conflicts?("/tmp/dir", "origin/dev", "origin/nonexistent")
+    end
+    assert_includes error.message, "not something we can merge"
+  end
+
+  def test_merge_conflicts_raises_on_operational_git_failure
+    gh = Train::Github.new
+    stub_git_status(gh, 128, stderr: "fatal: not a tree")
+
+    error = assert_raises(Train::Github::CommandError) do
+      gh.merge_conflicts?("/tmp/dir", "origin/dev", "origin/main")
+    end
+    assert_includes error.message, "not a tree"
+  end
+
+  def test_ancestor_raises_on_operational_git_failure
+    # exit 128 (bad ref, corrupt repo) must not read as "not an ancestor".
+    gh = Train::Github.new
+    stub_git_status(gh, 128, stderr: "fatal: Not a valid object name origin/main")
+
+    error = assert_raises(Train::Github::CommandError) do
+      gh.ancestor?("/tmp/dir", "origin/main", "origin/dev")
+    end
+    assert_includes error.message, "Not a valid object name"
   end
 
   # ---- tag_sha: prefers the peeled (^{}) line for annotated tags ----
@@ -450,29 +566,6 @@ class GithubTest < Minitest::Test
 
     assert_equal "2026-07-15T00:00:00Z", result.first["merged_at"]
     assert_equal "tip-abc", result.first["head-sha"]
-  end
-
-  # ---- ancestor?: merge-base exit-code mapping ----
-
-  # stub_git_status: like stub_git_output but with a controllable exit
-  # status — ancestor?'s whole subtlety is the exit-code mapping (0 = yes;
-  # 1 = no; >1 = error e.g. unknown rev, also treated as "not confirmed").
-  def stub_git_status(gh, ok)
-    gh.define_singleton_method(:run) { |_args| ["", "", FakeOkStatus.new(ok)] }
-  end
-
-  def test_ancestor_true_on_exit_zero
-    gh = Train::Github.new
-    stub_git_status(gh, true)
-
-    assert gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
-  end
-
-  def test_ancestor_false_on_any_nonzero_exit
-    gh = Train::Github.new
-    stub_git_status(gh, false)
-
-    refute gh.ancestor?("/tmp/dir", "sha-a", "sha-b")
   end
 
   # ---- branch_exists?: rescue ordering (same bug class as release_exists?) ----

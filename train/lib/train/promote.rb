@@ -154,19 +154,40 @@ module Train
       branch = "#{kind}/#{version}"
       yield restore_branch_if_deleted(repo: repo, branch: branch)
 
-      @gh.pr_create(
+      number = @gh.pr_create(
         repo: repo, base: "dev", head: branch,
         title: "Back-merge #{kind} #{version} into dev",
-        body: "Automated back-merge of #{branch} into dev. Conflicts? Resolve them here manually."
+        body: "Automated back-merge of #{branch} into dev. Conflicts? Resolve them here manually. " \
+              "Auto-merge is armed with a merge commit — do not squash: dev must inherit main's ancestry, " \
+              "or every later release PR conflicts against main."
       )
+      # Prefer the created PR's own number; the branch name (dry-run returns
+      # no number) is resolved against base dev inside pr_merge_auto.
+      arm_true_merge(repo: repo, pr: number || branch)
       Success(:ok)
     rescue Github::ApiError => e
       if TOLERATED_BACK_MERGE_ERRORS.any? { |m| e.message.downcase.include?(m) }
         @out.puts "train: back-merge for #{repo}@#{branch}: #{e.message} (tolerated)"
+        # The PR from a prior run may be sitting un-armed (e.g. that run died
+        # between create and arm) — re-arm, mirroring Cut#ensure_bump_pr.
+        arm_true_merge(repo: repo, pr: branch) if e.message.downcase.include?("already exists")
         return Success(:ok)
       end
 
       Failure("#{kind} back-merge PR failed for #{repo}: #{e.message}")
+    end
+
+    # A squash strips the ancestry the back-merge PR exists to carry, so arm
+    # auto-merge pinned to a true merge; base "dev" avoids the same-head
+    # release PR to main. Best-effort: Cut#guard_ancestry is the backstop.
+    def arm_true_merge(repo:, pr:)
+      ok = @gh.pr_merge_auto(repo: repo, head_or_number: pr, methods: ["MERGE"], base: "dev")
+      return if ok
+
+      @out.puts "train: warning: could not arm merge-commit auto-merge on #{repo}##{pr} — " \
+                "merge it with 'Create a merge commit', never squash"
+    rescue Github::ApiError => e
+      @out.puts "train: warning: auto-merge arm failed for #{repo}##{pr}: #{e.message}"
     end
 
     # Release counterpart to the always-on hotfix back-merge. Runs the
@@ -191,12 +212,9 @@ module Train
     # app_dir's remote identity or on the release branch still existing, and
     # never mutates anything (dry-run safe, no branch resurrection).
     #
-    # The author list is computed locally in `dir` (the app-repo checkout record
-    # already holds): we fetch the two concrete SHAs — always valid commits, so
-    # this works even if the branch ref is gone — then `git log dev..tip`. We do
-    # NOT gate on `ancestor?` (it swallows git errors as false); `commit_authors`
-    # uses `run!`, so any bad ref RAISES and the caller turns it into a hard
-    # Failure (fail loud, not fail open).
+    # The author list is computed locally in `dir` from the two fetched SHAs
+    # (works even if the branch ref is gone). `commit_authors` uses `run!`,
+    # so a bad ref raises and becomes a hard Failure — fail loud, not open.
     def release_needs_back_merge?(repo:, dir:, version:)
       # `--repo` and `--app-dir` arrive independently on record; the SHAs below
       # come from `dir`'s origin while the PR is opened on `repo`, so confirm the

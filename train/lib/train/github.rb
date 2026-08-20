@@ -93,12 +93,27 @@ module Train
     end
 
     # Whether `ancestor` is reachable from `descendant` in the local clone.
-    # merge-base --is-ancestor exits non-zero for "no" AND for errors (e.g. a
-    # sha the clone lacks) — either way the relationship isn't trustworthy, so
-    # any failure is false.
+    # merge-base --is-ancestor answers "no" with exit 1; anything above 1 is
+    # an operational git failure and raises instead of posing as a verdict.
     def ancestor?(dir, ancestor, descendant)
-      _out, _err, status = run(["git", "-C", dir, "merge-base", "--is-ancestor", ancestor, descendant])
-      status.success?
+      args = ["git", "-C", dir, "merge-base", "--is-ancestor", ancestor, descendant]
+      stdout, stderr, status = run(args)
+      return true if status.success?
+      return false if status.exitstatus == 1
+
+      raise CommandError.new(args, stdout: stdout, stderr: stderr, status: status)
+    end
+
+    # Whether merging `ours` and `theirs` would conflict (merge-tree
+    # --write-tree, no worktree). Exit 1 counts as a conflict verdict only
+    # when a tree was written; refusals like a bad ref (also exit 1) raise.
+    def merge_conflicts?(dir, ours, theirs)
+      args = ["git", "-C", dir, "merge-tree", "--write-tree", ours, theirs]
+      stdout, stderr, status = run(args)
+      return false if status.success?
+      return true if status.exitstatus == 1 && !stdout.strip.empty?
+
+      raise CommandError.new(args, stdout: stdout, stderr: stderr, status: status)
     end
 
     # Author emails (%ae) of the commits in `range` (e.g. "dev..release/2.2.0"),
@@ -307,12 +322,13 @@ module Train
       end
     end
 
-    # Return value is discarded — callers create-and-forget, and pr_merge_auto
-    # resolves the PR itself rather than needing this return's node_id.
+    # Returns the created PR's number (nil under dry-run) so callers can act
+    # on the exact PR instead of re-resolving by branch, which races
+    # visibility and can hit a same-head PR against another base.
     def pr_create(repo:, base:, head:, title:, body:)
       mutate!("create PR #{repo} #{head}->#{base}: #{title.inspect}") do
-        api! { client.create_pull_request(repo, base, head, title, body) }
-        nil
+        pr = api! { client.create_pull_request(repo, base, head, title, body) }
+        pr[:number]
       end
     end
 
@@ -350,15 +366,18 @@ module Train
     MERGE_METHODS = %w[SQUASH MERGE REBASE].freeze
 
     # Enable GitHub's native auto-merge (GraphQL-only, needs the PR node id).
-    # head_or_number may be a branch name or a PR number — resolve to the PR
-    # object either way. Tries MERGE_METHODS in order.
-    def pr_merge_auto(repo:, head_or_number:)
+    # head_or_number is a branch name or PR number. Tries `methods` in order;
+    # `base` pins branch-name resolution to one target base (a head can have
+    # open PRs against several, and arming must never touch a sibling PR).
+    def pr_merge_auto(repo:, head_or_number:, methods: MERGE_METHODS, base: nil)
       mutate!("enable auto-merge #{repo}##{head_or_number}", default: true) do
         pr = if head_or_number.is_a?(Integer) || head_or_number.to_s.match?(/\A\d+\z/)
           api! { client.pull_request(repo, head_or_number.to_i) }
         else
           owner = repo.split("/").first
-          api! { client.pull_requests(repo, head: "#{owner}:#{head_or_number}", state: "open") }.first
+          options = { head: "#{owner}:#{head_or_number}", state: "open" }
+          options[:base] = base if base
+          api! { client.pull_requests(repo, options) }.first
         end
         unless pr
           @out.puts "train: warning: auto-merge: PR #{repo}##{head_or_number} not found"
@@ -366,19 +385,19 @@ module Train
         end
 
         try_merge_methods(repo: repo, head_or_number: head_or_number, node_id: pr[:node_id],
-                          number: pr[:number], head_sha: pr.dig(:head, :sha))
+                          number: pr[:number], head_sha: pr.dig(:head, :sha), methods: methods)
       end
     end
 
     private
 
-    # Tries each MERGE_METHOD in turn: a /not allowed/i GraphQL error advances
+    # Tries each method in turn: a /not allowed/i GraphQL error advances
     # to the next, any other error is final. Returns true on the first
     # accepted method, false (warning) if all are rejected.
-    def try_merge_methods(repo:, head_or_number:, node_id:, number:, head_sha: nil)
+    def try_merge_methods(repo:, head_or_number:, node_id:, number:, head_sha: nil, methods: MERGE_METHODS)
       attempted = []
       last_message = nil
-      MERGE_METHODS.each do |method|
+      methods.each do |method|
         attempted << method
         errors = attempt_auto_merge(node_id: node_id, method: method)
         return true if errors.nil?

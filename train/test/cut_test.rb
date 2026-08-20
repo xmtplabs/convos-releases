@@ -74,6 +74,36 @@ class CutTest < Minitest::Test
     assert_equal({ "channel" => "C0APP", "ts" => "1700000000.000100" }, data["announcement"])
   end
 
+  def test_cut_probes_main_dev_mergeability_in_both_repos
+    new_cut.run(force: true, date_override: EDT_THU)
+
+    calls = @gh.calls_for(:merge_conflicts?)
+    assert_equal %w[convos-ios convos-client], calls.map { |c| File.basename(c.args[0]) }
+    calls.each { |c| assert_equal ["origin/dev", "origin/main"], c.args[1..2] }
+  end
+
+  def test_cut_fails_when_merging_main_into_dev_would_conflict
+    @gh.stub_merge_conflict("convos-ios")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/convos-ios: merging main into dev would conflict/, result.failure)
+    assert_match(/squash-merged/, result.failure)
+    refute Dir.exist?(File.join(@releases_dir, "releases", "2.1.0")),
+           "a divergence failure must abort before the manifest is claimed"
+  end
+
+  def test_cut_mergeability_git_failure_is_reported_as_operational_not_as_bad_back_merge
+    @gh.fail_merge_check("convos-ios")
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(%r{could not evaluate main/dev mergeability}, result.failure)
+    refute_match(/squash-merged/, result.failure)
+  end
+
   def test_dry_run_does_not_announce
     gh = FakeGithub.new(dry_run: true)
     stub_clones_on(gh, version: "2.1.0")
