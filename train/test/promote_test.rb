@@ -598,6 +598,48 @@ class PromoteTest < Minitest::Test
     assert_match(/conflict/i, back_merge.kwargs[:body])
   end
 
+  # A squash strips the ancestry the back-merge carries, so record arms
+  # auto-merge pinned to MERGE and re-arms when the PR already exists.
+  def test_record_on_hotfix_back_merge_arms_auto_merge_with_a_true_merge
+    stub_releases_clone(kind: "hotfix")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    arm = @gh.calls_for(:pr_merge_auto).find { |c| c.kwargs[:methods] == ["MERGE"] }
+    refute_nil arm, "expected auto-merge to be armed on the back-merge PR"
+    # The fresh-create path arms by the created PR's own number, never by a
+    # branch lookup that could race or resolve a same-head sibling PR.
+    assert_kind_of Integer, arm.kwargs[:head_or_number]
+    assert_equal "dev", arm.kwargs[:base]
+  end
+
+  def test_record_back_merge_pr_already_exists_still_arms_auto_merge
+    stub_releases_clone(kind: "hotfix")
+    @gh.fail_pr_create(REPO, message: "A pull request already exists for hotfix/#{VERSION}.")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    arm = @gh.calls_for(:pr_merge_auto).find { |c| c.kwargs[:head_or_number] == "hotfix/#{VERSION}" }
+    refute_nil arm, "an existing back-merge PR must still get auto-merge re-armed"
+    assert_equal ["MERGE"], arm.kwargs[:methods]
+    # Branch resolution must pin base dev — this head also has a PR to main.
+    assert_equal "dev", arm.kwargs[:base]
+  end
+
+  def test_record_back_merge_auto_merge_arm_failure_is_a_warning_not_a_failure
+    stub_releases_clone(kind: "hotfix")
+    # The fake's pr_create numbers count up from 101; the back-merge PR is
+    # this record run's first create, so its arm call targets 101.
+    @gh.stub_pr_merge_auto_result(REPO, 101, false)
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_match(/never squash/, @out.string)
+  end
+
   # Model DISTINCT dev and release-tip shas so the divergence range is a real
   # "devsha..releasesha"; commit_authors on that range yields `authors`.
   def stub_release_divergence(authors:, dev_sha: "devsha", release_tip: "releasesha")

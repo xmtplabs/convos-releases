@@ -139,6 +139,12 @@ class FakeGithub
     @permissions[repo] = permission
   end
 
+  # stub_pr_merge_auto_result: scripts pr_merge_auto's return value for this
+  # repo + head/number — tests default to true (armed).
+  def stub_pr_merge_auto_result(repo, head_or_number, value)
+    @pr_merge_results[[repo, head_or_number]] = value
+  end
+
   # fail_pr_merge: every subsequent pr_merge(repo, number) call raises
   # Train::Github::ApiError with `message` instead of recording a merge.
   def fail_pr_merge(repo, number, message: "simulated merge failure")
@@ -214,6 +220,33 @@ class FakeGithub
   def ancestor?(dir, ancestor, descendant)
     record(:ancestor?, [dir, ancestor, descendant])
     !(@not_ancestors || {})[suffix(dir)]
+  end
+
+  # merge_conflicts?: read-only, defaults to false (clean merge) unless
+  # scripted via stub_merge_conflict; fail_merge_check scripts the real
+  # seam's exit>1 CommandError (operational git failure) instead.
+  def merge_conflicts?(dir, ours, theirs)
+    record(:merge_conflicts?, [dir, ours, theirs])
+    if (msg = (@merge_check_failures ||= {})[suffix(dir)])
+      raise ::Train::Github::CommandError.new(
+        ["git", "-C", dir, "merge-tree", "--write-tree", ours, theirs],
+        stdout: "", stderr: msg, status: fake_failed_status
+      )
+    end
+    (@merge_conflicts || {})[suffix(dir)] || false
+  end
+
+  # stub_merge_conflict: scripts merge_conflicts? to report conflicts for
+  # this clone's directory basename; tests default to a clean merge.
+  def stub_merge_conflict(dir_suffix)
+    (@merge_conflicts ||= {})[dir_suffix] = true
+  end
+
+  # fail_merge_check: merge_conflicts? calls for this clone's directory
+  # basename raise Train::Github::CommandError — an operational git failure
+  # as opposed to a genuine conflict verdict.
+  def fail_merge_check(dir_suffix, message: "simulated merge-tree failure")
+    (@merge_check_failures ||= {})[dir_suffix] = message
   end
 
   def clone(url, dest, depth: nil, filter: nil)
@@ -349,15 +382,20 @@ class FakeGithub
     (@fetch_failures ||= {})[dir_suffix] = message
   end
 
+  # Returns an incrementing PR number (nil under dry-run), mirroring the
+  # real seam so callers can address the created PR directly.
   def pr_create(repo:, base:, head:, title:, body:)
     record(:pr_create, [], { repo: repo, base: base, head: head, title: title, body: body })
     if @pr_create_failures&.key?(repo)
       raise ::Train::Github::ApiError, @pr_create_failures[repo]
     end
+    return nil if @dry_run
+
+    @pr_number_seq = (@pr_number_seq || 100) + 1
   end
 
-  def pr_merge_auto(repo:, head_or_number:)
-    record(:pr_merge_auto, [], { repo: repo, head_or_number: head_or_number })
+  def pr_merge_auto(repo:, head_or_number:, methods: nil, base: nil)
+    record(:pr_merge_auto, [], { repo: repo, head_or_number: head_or_number, methods: methods, base: base })
     @pr_merge_results[[repo, head_or_number]]
   end
 

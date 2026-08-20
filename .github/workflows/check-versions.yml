@@ -50,6 +50,10 @@ jobs:
       # `secrets` can't be used in a step `if:`, so surface presence via env
       # (which can). Empty on fork/Dependabot PRs, where secrets are withheld.
       HAS_BOT_SECRETS: ${{ secrets.RELEASES_BOT_APP_ID != '' && secrets.RELEASES_BOT_PRIVATE_KEY != '' }}
+      # The cut opens both repos' bot/bump-* PRs at once, so each fails the
+      # sibling comparison until the other's bump merges — skip it for them
+      # only (self check still runs; scoped to bot-authored same-repo heads).
+      SIBLING_EXEMPT: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.type == 'Bot' && startsWith(github.head_ref, 'bot/bump-') }}
     steps:
       # self-repo at the PR head. submodules: the client carries convos-shared;
       # harmless where there are none. Path keeps it clear of the sibling.
@@ -68,6 +72,7 @@ jobs:
       # OWNER/NAME; strip the owner from sibling-repo.
       - name: Resolve sibling repo name
         id: sibling
+        if: ${{ env.SIBLING_EXEMPT != 'true' }}
         env:
           SIBLING_REPO: ${{ inputs.sibling-repo }}
         run: echo "name=${SIBLING_REPO##*/}" >> "$GITHUB_OUTPUT"
@@ -77,7 +82,7 @@ jobs:
       # for a public sibling.
       - name: Mint bot token for sibling checkout
         id: bot
-        if: ${{ env.HAS_BOT_SECRETS == 'true' }}
+        if: ${{ env.HAS_BOT_SECRETS == 'true' && env.SIBLING_EXEMPT != 'true' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.RELEASES_BOT_APP_ID }}
@@ -90,6 +95,7 @@ jobs:
       # minted — a public sibling still clones, a private one can't be read
       # without a token (inherent, not a regression).
       - name: Check out sibling repo (dev)
+        if: ${{ env.SIBLING_EXEMPT != 'true' }}
         uses: actions/checkout@v6
         with:
           repository: ${{ inputs.sibling-repo }}
@@ -112,8 +118,15 @@ jobs:
           SIBLING_LABEL: ${{ inputs.sibling-repo }}
         # `train` comes from self/flake's dev shell (convos-releases input).
         # Paths are relative to the shell's cwd (self/), so the sibling is ../.
+        # Exempt heads run the self-only check (internal consistency).
         run: |
           cd self
-          nix develop ./ --command train check-versions \
-            --dir "${SELF_LABEL}=." \
-            --dir "${SIBLING_LABEL}=../sibling"
+          if [ "$SIBLING_EXEMPT" = "true" ]; then
+            echo "train-authored bump PR — skipping sibling comparison, checking self consistency only"
+            nix develop ./ --command train check-versions \
+              --dir "${SELF_LABEL}=."
+          else
+            nix develop ./ --command train check-versions \
+              --dir "${SELF_LABEL}=." \
+              --dir "${SIBLING_LABEL}=../sibling"
+          fi
