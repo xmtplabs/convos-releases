@@ -2,18 +2,11 @@
 
 _For app reviewers: summarize user-visible changes, test-account hints._
 
-## Features
-- feat(abilities): Abilities V2 — MCP-backed abilities client + read-side UI (#172)
-- feature(pairing): android paired device sync - receive side (#171)
+Hi team! We've introduced agent participation settings, giving users more control over how their group's agent engages with the group.
 
-## Fixes
-- fix(invite): make the in-conversation Show an invite code button work (#180)
-- fix(pairing): re-read history after the archive lands, not just ask for it (#174)
-- fix(consent): consent was only determined by group creator when it should take into account sender of the welcome as well (#167)
+And we've added a new “side channel” where you can talk with your group's agent privately.
 
-## Other
-- Add Space share debug action (#176)
-- Mpr/agent desktop (#175)
-- perf(hooks): one source of truth for git hooks, and a faster commit gate (#173)
-- ci(firebase): build prod stream from release branches, not dev (#165)
+And of course, we’re including substantial bug fixes and performance enhancements.
+
+Thanks for taking a look!
 
