@@ -1,12 +1,12 @@
 version: 2.5.0
 kind: release
 cut-date: '2026-08-20'
-status: branched
+status: promoted
 repos:
   xmtplabs/convos-ios:
     source-sha: f9e8a0380dba5fd73558fd854cbc0084c0eddd21
     release-branch: release/2.5.0
-    status: rc-available
+    status: promoted
     rc:
     - sha: 92ce53ea1b701d2890d5b341b7c707e90164dc8c
       run: https://github.com/xmtplabs/convos-ios/actions/runs/32418289991
@@ -23,6 +23,11 @@ repos:
     - sha: '0867ed58b0971bb9d0dd225e055e87defb9157d3'
       run: https://github.com/xmtplabs/convos-ios/actions/runs/32661849487
       build-number: 1367
+    promoted:
+      build-number: 1367
+      tag: v2.5.0
+      notes-sha: bc8534ce842c47d01fbb93edc8790e85a73848b3
+      run: https://github.com/xmtplabs/convos-ios/actions/runs/32664231446
   xmtplabs/convos-client:
     source-sha: c61765e3b1a78bace9afd77293d28f47953aa4f2
     release-branch: release/2.5.0
