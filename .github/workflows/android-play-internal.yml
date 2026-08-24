@@ -39,6 +39,25 @@ jobs:
         with:
           submodules: true
 
+      # Once promotion tags v<version>, no push to its release/hotfix branch
+      # may upload another build — a later Play internal build would displace
+      # the promoted one and desync the release dashboard's build check. A
+      # post-promotion push here is an anomaly: fail loud rather than build.
+      - name: Refuse to displace a promoted RC
+        if: startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="${REF_NAME#*/}"
+          if ! tag_ref=$(git ls-remote origin "refs/tags/v${version}"); then
+            echo "::error::could not query origin for refs/tags/v${version}"
+            exit 1
+          fi
+          if [ -n "$tag_ref" ]; then
+            echo "::error::v${version} is already tagged — promotion is complete; refusing to upload a build that would displace the promoted one (push to ${REF_NAME})."
+            exit 1
+          fi
+
       - name: Set up Nix
         # Qualified ref: reusable workflows check out the CALLER's repo.
         # sticky-disk gates on the label so non-Blacksmith callers are
