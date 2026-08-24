@@ -1,7 +1,5 @@
 # Submission notes for 2.5.0
 
-_For app reviewers: summarize user-visible changes, test-account hints._
-
 Hi team! We've introduced agent participation settings, giving users more control over how their group's agent engages with the group.
 
 And we've added a new “side channel” where you can talk with your group's agent privately.

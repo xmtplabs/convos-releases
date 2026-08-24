@@ -147,17 +147,26 @@ module Train
 
     # Hard-gated: a genuine API failure returns Failure and aborts record
     # before the manifest is written; only the two tolerated errors above
-    # become a Success note. The branch is restored first if absent —
-    # delete-branch-on-merge removes it, and a PR can't open from a deleted head.
-    # kind is "hotfix" or "release" — same machinery, different branch prefix.
+    # become a Success note. kind is "hotfix" or "release" — same machinery,
+    # different source branch.
+    #
+    # The PR head is a dedicated backmerge/<version> branch at the source
+    # branch's tip, NEVER release/<v> or hotfix/<v> themselves: the app
+    # repos' RC-upload workflows run on every push to those branches, and
+    # create_ref fires a real push event — recreating a source branch that
+    # delete-branch-on-merge removed uploaded a NEW store build of the
+    # just-promoted version, displacing the recorded RC (the 2.5.0 ghost
+    # build). Conflict-resolution pushes land on backmerge/<v> too, where
+    # they equally trigger nothing.
     def open_back_merge_pr(repo:, version:, kind:)
-      branch = "#{kind}/#{version}"
-      yield restore_branch_if_deleted(repo: repo, branch: branch)
+      source = "#{kind}/#{version}"
+      branch = "backmerge/#{version}"
+      yield ensure_backmerge_branch(repo: repo, branch: branch, source: source)
 
       number = @gh.pr_create(
         repo: repo, base: "dev", head: branch,
         title: "Back-merge #{kind} #{version} into dev",
-        body: "Automated back-merge of #{branch} into dev. Conflicts? Resolve them here manually. " \
+        body: "Automated back-merge of #{source} into dev. Conflicts? Resolve them here manually. " \
               "Auto-merge is armed with a merge commit — do not squash: dev must inherit main's ancestry, " \
               "or every later release PR conflicts against main."
       )
@@ -191,9 +200,9 @@ module Train
     end
 
     # Release counterpart to the always-on hotfix back-merge. Runs the
-    # divergence+author gate, and opens the PR (restoring the merge-deleted
-    # branch first, inside open_back_merge_pr) ONLY when a non-bot commit
-    # diverged — a clean/bot-only release is never resurrected. EVERY git/API
+    # divergence+author gate, and opens the PR (creating the backmerge/<v>
+    # head first, inside open_back_merge_pr) ONLY when a non-bot commit
+    # diverged — a clean/bot-only release opens nothing. EVERY git/API
     # step must become a hard Failure, never an escaped exception (binding
     # constraint: aborts record, manifest untouched; the caller only handles the
     # Result contract), so the whole body sits inside one rescue.
@@ -291,7 +300,7 @@ module Train
     # The head-sha of the LAST-merged PR from `branch` into main (max merged_at),
     # or "" if none. GitHub lists PRs newest-CREATED first, so `.find`/`.first`
     # can pick a stale reopened/superseded PR; select by merge time instead.
-    # Shared by the release back-merge tip lookup and restore_branch_if_deleted.
+    # Shared by the release back-merge tip lookup and ensure_backmerge_branch.
     def merged_pr_head_sha(repo:, branch:)
       merged = @gh.pr_list(repo: repo, head: branch, base: "main", state: "all")
                   .select { |pr| pr["merged_at"] }
@@ -299,18 +308,23 @@ module Train
       merged ? merged["head-sha"].to_s : ""
     end
 
-    # Recreate hotfix/<version> at the merged PR's recorded head sha — the
-    # authoritative tip, since the tag is the MERGE commit, not the tip.
-    def restore_branch_if_deleted(repo:, branch:)
+    # Create backmerge/<version> at `source`'s tip — the live branch tip
+    # when it survived its PR's merge, else the merged PR's recorded head
+    # sha (the tag is the MERGE commit, not the tip, so the PR record is
+    # the authoritative fallback). An EXISTING backmerge branch is used
+    # exactly as-is: a rerun may find a human's conflict-resolution pushes
+    # on it, which must never be clobbered.
+    def ensure_backmerge_branch(repo:, branch:, source:)
       return Success(:ok) if @gh.branch_exists?(repo, branch)
 
-      head_sha = merged_pr_head_sha(repo: repo, branch: branch)
-      if head_sha.empty?
-        return Failure("#{branch} is gone on #{repo} and no merged PR records its head sha — restore the branch manually, then re-run")
+      tip = @gh.branch_sha(repo, source)
+      tip = merged_pr_head_sha(repo: repo, branch: source) if tip.empty?
+      if tip.empty?
+        return Failure("#{source} is gone on #{repo} and no merged PR records its head sha — create #{branch} at the back-merge tip manually, then re-run")
       end
 
-      @gh.create_ref(repo, branch: branch, sha: head_sha)
-      @out.puts "#{repo}: restored #{branch} @ #{head_sha} (deleted on merge)"
+      @gh.create_ref(repo, branch: branch, sha: tip)
+      @out.puts "#{repo}: created #{branch} @ #{tip} (back-merge head for #{source})"
       Success(:ok)
     end
 

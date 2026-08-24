@@ -138,16 +138,18 @@ repo — you can't hotfix an older line.
    placeholders.
 4. **Merge**: `@convos-conductor merge` on the hotfix PR.
 5. **Promotion** runs as above, plus: it opens a **back-merge PR**
-   `hotfix/x.y.(z+1)` → dev BEFORE recording anything (if that PR can't be
-   created, promotion fails rather than losing the fix from dev). Expect a
+   `backmerge/x.y.(z+1)` (the hotfix tip) → dev BEFORE recording anything
+   (if that PR can't be created, promotion fails rather than losing the
+   fix from dev). The PR head is a dedicated `backmerge/…` branch — never
+   `hotfix/…` itself, whose every push uploads a displacing RC. Expect a
    version-file conflict on the back-merge — dev is on the next minor;
    resolve it keeping dev's version.
 6. **Press the store buttons.**
 
 Rerun-safe: re-dispatching the same hotfix reconciles (manifest kind and
 source shas must match; a hotfix branch is verified by ancestry). A
-`hotfix/…` branch auto-deleted on merge is restored automatically for the
-back-merge.
+`hotfix/…` branch auto-deleted on merge is fine: the `backmerge/…` head is
+created from the merged PR's recorded tip.
 
 Sharp edges:
 - **Both platforms hotfixing from the same base share the version.** An
