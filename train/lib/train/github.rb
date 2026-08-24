@@ -244,10 +244,28 @@ module Train
       raise ApiError.new("branch(#{repo}, #{branch}): #{e.message}", cause: e)
     end
 
-    # True if `path` has uncommitted changes. Read-only.
+    # True if `path` has uncommitted changes. Read-only. NB: this compares
+    # the WORKTREE to the index only — a change that was edited and then
+    # `git add`ed looks clean here; pair with staged? to cover both.
     def dirty?(dir, path)
       _out, _err, status = run(["git", "-C", dir, "diff", "--quiet", "--", path])
       !status.success?
+    end
+
+    # True if `path` has staged (index-vs-HEAD) changes — the half dirty?
+    # cannot see. Read-only.
+    def staged?(dir, path)
+      _out, _err, status = run(["git", "-C", dir, "diff", "--cached", "--quiet", "--", path])
+      !status.success?
+    end
+
+    # The checkout's current branch name, or its HEAD sha when detached —
+    # what a caller needs to restore the checkout after detaching it.
+    def head_ref(dir)
+      out, _err, status = run(["git", "-C", dir, "symbolic-ref", "--quiet", "--short", "HEAD"])
+      return out.strip if status.success? && !out.strip.empty?
+
+      rev_parse(dir)
     end
 
     # `git checkout -B branch sha` — creates/resets a local branch. Local-only

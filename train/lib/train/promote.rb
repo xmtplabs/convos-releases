@@ -369,36 +369,51 @@ module Train
       raise Github::ApiError, "no dev branch on #{repo} — cannot build #{branch}" if dev_sha.to_s.empty?
 
       version_file = Versions.layout_for(app_dir).last
-      if @gh.dirty?(app_dir, version_file)
+      # Both halves: dirty? is worktree-vs-index, staged? is index-vs-HEAD.
+      # Either way the build would carry someone's uncommitted work onto
+      # the pushed back-merge head.
+      if @gh.dirty?(app_dir, version_file) || @gh.staged?(app_dir, version_file)
         return Failure("#{repo}: #{version_file} has uncommitted changes — commit or discard them, then re-run")
       end
 
-      @gh.fetch(app_dir, dev_sha)
-      @gh.fetch(app_dir, tip)
-      @gh.checkout(app_dir, dev_sha)
-      dev_version = Versions.read(app_dir)
-      @gh.checkout(app_dir, tip)
+      # The build detaches the checkout; restore whatever it was on, on
+      # every path out (record is CI's last train step, but manual runs
+      # happen in a human's clone where a stray detached HEAD strands
+      # later commits).
+      original_head = @gh.head_ref(app_dir)
+      begin
+        @gh.fetch(app_dir, dev_sha)
+        @gh.fetch(app_dir, tip)
+        @gh.checkout(app_dir, dev_sha)
+        dev_version = Versions.read(app_dir)
+        @gh.checkout(app_dir, tip)
 
-      if Versions.read(app_dir) == dev_version
-        @out.puts "#{repo}: #{branch} @ #{tip} already carries dev's version #{dev_version}"
-        return Success(:ok) if @gh.branch_exists?(repo, branch)
-      else
-        @gh.git_config_bot(app_dir)
-        Versions.bump(app_dir, dev_version)
-        # Commit ONLY the version file: bump has already proven its rewrite
-        # touched nothing but version lines, and the path-scoped commit
-        # keeps any other index/worktree state out of what gets pushed.
-        @gh.commit(app_dir, "train: keep dev's version #{dev_version} on #{branch}",
-                   paths: [version_file])
-        @out.puts "#{repo}: reset versions to #{dev_version} on #{branch}"
+        if Versions.read(app_dir) == dev_version
+          @out.puts "#{repo}: #{branch} @ #{tip} already carries dev's version #{dev_version}"
+          return Success(:ok) if @gh.branch_exists?(repo, branch)
+        else
+          @gh.git_config_bot(app_dir)
+          Versions.bump(app_dir, dev_version)
+          # Commit ONLY the version file: bump has already proven its
+          # rewrite touched nothing but version lines, and the path-scoped
+          # commit keeps any other index/worktree state out of the push.
+          @gh.commit(app_dir, "train: keep dev's version #{dev_version} on #{branch}",
+                     paths: [version_file])
+          @out.puts "#{repo}: reset versions to #{dev_version} on #{branch}"
+        end
+
+        # The pushed sha is HEAD, which the reset commit (when there was
+        # one) has moved past `tip`.
+        pushed = @gh.rev_parse(app_dir)
+        unless @gh.push(app_dir, "HEAD:refs/heads/#{branch}")
+          return Failure("#{repo}: pushing #{branch} was rejected (moved concurrently?) — re-run")
+        end
+
+        @out.puts "#{repo}: pushed #{branch} @ #{pushed} (back-merge head for #{source})"
+        Success(:ok)
+      ensure
+        @gh.checkout(app_dir, original_head)
       end
-
-      unless @gh.push(app_dir, "HEAD:refs/heads/#{branch}")
-        return Failure("#{repo}: pushing #{branch} was rejected (moved concurrently?) — re-run")
-      end
-
-      @out.puts "#{repo}: pushed #{branch} @ #{tip} (back-merge head for #{source})"
-      Success(:ok)
     rescue Versions::Error => e
       Failure("#{repo}: version pre-resolution on #{branch} failed: #{e.message}")
     # record's contract is a Result, not an exception: the version surgery

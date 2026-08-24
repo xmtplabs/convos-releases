@@ -481,6 +481,48 @@ class GithubTest < Minitest::Test
     assert_equal false, gh.ancestor?("/tmp/dir", "origin/main", "origin/dev")
   end
 
+  # ---- staged? / head_ref: the back-merge build's checkout guards ----
+
+  def test_staged_reports_index_vs_head_for_the_path
+    gh = Train::Github.new
+    args = nil
+    gh.define_singleton_method(:run) do |argv|
+      args = argv
+      ["", "", FakeExitStatus.new(1)]
+    end
+
+    assert_equal true, gh.staged?("/tmp/app", "version.txt")
+    # --cached is what separates this from dirty?'s worktree comparison.
+    assert_equal ["git", "-C", "/tmp/app", "diff", "--cached", "--quiet", "--", "version.txt"], args
+  end
+
+  def test_staged_false_when_index_matches_head
+    gh = Train::Github.new
+    stub_git_status(gh, 0)
+
+    assert_equal false, gh.staged?("/tmp/app", "version.txt")
+  end
+
+  def test_head_ref_returns_the_branch_name_when_on_one
+    gh = Train::Github.new
+    gh.define_singleton_method(:run) { |_args| ["my-branch\n", "", FakeExitStatus.new(0)] }
+
+    assert_equal "my-branch", gh.head_ref("/tmp/app")
+  end
+
+  # Detached HEAD: symbolic-ref exits non-zero, so the sha is the ref to
+  # restore — returning "HEAD" would be a no-op that loses the position.
+  def test_head_ref_falls_back_to_the_sha_when_detached
+    gh = Train::Github.new
+    gh.define_singleton_method(:run) do |args|
+      next ["", "", FakeExitStatus.new(1)] if args.include?("symbolic-ref")
+
+      ["detached-sha\n", "", FakeExitStatus.new(0)]
+    end
+
+    assert_equal "detached-sha", gh.head_ref("/tmp/app")
+  end
+
   # ---- merge_conflicts?: merge-tree exit-code mapping ----
 
   def test_merge_conflicts_false_on_clean_merge

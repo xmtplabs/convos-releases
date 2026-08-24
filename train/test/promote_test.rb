@@ -1004,6 +1004,64 @@ class PromoteTest < Minitest::Test
     refute(@gh.calls_for(:push).any? { |c| c.args[1].to_s.include?("backmerge/") })
   end
 
+  # dirty? only compares worktree-vs-index, so a version file that was
+  # edited AND staged looks clean to it — and the path-scoped commit would
+  # then carry that staged edit onto the pushed head.
+  def test_record_refuses_to_build_from_a_staged_version_file
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.set_staged(true)
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a staged version-file edit must abort the back-merge build"
+    assert_match(/uncommitted changes/, result.failure)
+    refute(@gh.calls_for(:push).any? { |c| c.args[1].to_s.include?("backmerge/") })
+  end
+
+  # The build detaches app_dir to read dev's version and to sit on the
+  # back-merge tip. It must put the checkout back: `record` is the last
+  # train step in CI, but manual runs happen in a human's clone, where a
+  # silently detached HEAD strands later commits.
+  def test_record_restores_the_original_head_after_the_build
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_head_ref(File.basename(@app_dir), "my-working-branch")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_equal "my-working-branch", @gh.calls_for(:checkout).last.args[1],
+                 "the caller's original HEAD must be restored last"
+  end
+
+  def test_record_restores_the_original_head_even_when_the_build_fails
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_head_ref(File.basename(@app_dir), "my-working-branch")
+    @gh.fail_push(File.basename(@app_dir))
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?
+    assert_equal "my-working-branch", @gh.calls_for(:checkout).last.args[1],
+                 "a failed build must still restore the caller's HEAD"
+  end
+
+  # The pushed head is the reset commit, not the tip it was built from —
+  # logging `tip` would send an operator to the wrong sha.
+  def test_record_logs_the_pushed_sha_not_the_pre_reset_tip
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_rev_parse(File.basename(@app_dir), "HEAD", "reset-commit-sha")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_match(/pushed backmerge\/#{VERSION} @ reset-commit-sha/, @out.string)
+    refute_match(/pushed backmerge\/#{VERSION} @ sha-hotfix/, @out.string)
+  end
+
   # Dry-run must not leave the caller's checkout rewritten or detached: the
   # local build is skipped entirely, not merely gated at the push.
   def test_record_dry_run_does_not_touch_the_local_checkout

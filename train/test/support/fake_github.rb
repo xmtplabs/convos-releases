@@ -492,6 +492,28 @@ class FakeGithub
     @dirty = value
   end
 
+  # staged?: index-vs-HEAD for one path — the half dirty? can't see.
+  # Defaults to false (nothing staged) so only tests that care opt in.
+  def staged?(dir, path)
+    record(:staged?, [dir, path])
+    @staged || false
+  end
+
+  def set_staged(value)
+    @staged = value
+  end
+
+  # head_ref: the caller's current branch name (or sha when detached), so
+  # the back-merge build can put the checkout back where it found it.
+  def head_ref(dir)
+    record(:head_ref, [dir])
+    (@head_refs || {})[suffix(dir)] || "original-head"
+  end
+
+  def stub_head_ref(dir_suffix, ref)
+    (@head_refs ||= {})[dir_suffix] = ref
+  end
+
   # ---- assertion helpers ----
 
   def called?(method)
