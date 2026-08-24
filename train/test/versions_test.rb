@@ -83,6 +83,22 @@ class VersionsTest < Minitest::Test
     assert_equal 3, content.scan("MARKETING_VERSION = 2.2.0;").size
   end
 
+  # bump rewrites app-owned files (the pbxproj especially is dense generated
+  # state), so it must PROVE the only lines it changed are version lines —
+  # the version pattern embedded inside some other setting's value must
+  # abort the write, never silently rewrite it.
+  def test_bump_ios_refuses_to_touch_a_non_version_line
+    path = ios_fixture(versions: %w[2.1.0 2.1.0])
+    File.write(path, File.read(path) + "\t\t\t\tOTHER_SETTING = \"MARKETING_VERSION = 2.1.0;\";\n")
+
+    error = assert_raises(Train::Versions::Error) { Train::Versions.bump(@dir, "2.2.0") }
+    assert_match(/non-version line/, error.message)
+    # No partial write: the file must be byte-identical to before the bump.
+    content = File.read(path)
+    assert_includes content, "OTHER_SETTING = \"MARKETING_VERSION = 2.1.0;\";"
+    assert_equal 0, content.scan("MARKETING_VERSION = 2.2.0;").size
+  end
+
   def test_bump_rejects_bad_format
     android_fixture(version: "2.1.0")
     assert_raises(Train::Versions::Error) { Train::Versions.bump(@dir, "2.2") }

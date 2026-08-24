@@ -136,11 +136,6 @@ class FakeOctokitClient
     result
   end
 
-  attr_reader :last_create_ref
-
-  def create_ref(repo, ref, sha)
-    @last_create_ref = { repo: repo, ref: ref, sha: sha }
-  end
 end
 
 class GithubTest < Minitest::Test
@@ -156,6 +151,9 @@ class GithubTest < Minitest::Test
     end
   end
   private_constant :FakeFailedStatus
+
+  FakeSuccessStatus = Struct.new(:success?)
+  private_constant :FakeSuccessStatus
 
   def test_command_error_redacts_token_url_from_message
     token = "ghs_supersecrettoken1234567890"
@@ -623,23 +621,33 @@ class GithubTest < Minitest::Test
     assert_raises(Train::Github::ApiError) { gh.branch_exists?("o/r", "hotfix/1.0.1") }
   end
 
-  # ---- create_ref ----
+  # ---- commit: path-scoped commits leave the rest of the index alone ----
 
-  def test_create_ref_posts_heads_ref
-    client = FakeOctokitClient.new
-    gh = Train::Github.new(client: client)
+  # The back-merge version reset runs in the caller's checkout, which may
+  # hold unrelated staged files; a path-scoped commit must name those paths
+  # after `--` so git commits only them.
+  def test_commit_with_paths_scopes_the_commit_to_those_pathspecs
+    gh = Train::Github.new
+    args = nil
+    gh.define_singleton_method(:run) do |argv|
+      args = argv
+      ["", "", FakeSuccessStatus.new(true)]
+    end
 
-    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
-
-    assert_equal({ repo: "o/r", ref: "heads/hotfix/1.0.1", sha: "tip-abc" }, client.last_create_ref)
+    assert gh.commit("/tmp/app", "msg", paths: ["/tmp/app/version.txt"])
+    assert_equal ["git", "-C", "/tmp/app", "commit", "-m", "msg", "--", "/tmp/app/version.txt"], args
   end
 
-  def test_create_ref_gated_under_dry_run
-    gh = Train::Github.new(dry_run: true, out: @out)
+  def test_commit_without_paths_has_no_pathspec_separator
+    gh = Train::Github.new
+    args = nil
+    gh.define_singleton_method(:run) do |argv|
+      args = argv
+      ["", "", FakeSuccessStatus.new(true)]
+    end
 
-    gh.create_ref("o/r", branch: "hotfix/1.0.1", sha: "tip-abc")
-
-    assert_match(/\[dry-run\] create_ref/, @out.string)
+    assert gh.commit("/tmp/app", "msg", all: true)
+    assert_equal ["git", "-C", "/tmp/app", "commit", "-a", "-m", "msg"], args
   end
 
   # ---- with_releases_clone: tmpdir lifecycle around the block ----

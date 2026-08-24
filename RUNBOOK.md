@@ -141,9 +141,11 @@ repo — you can't hotfix an older line.
    `backmerge/x.y.(z+1)` (the hotfix tip) → dev BEFORE recording anything
    (if that PR can't be created, promotion fails rather than losing the
    fix from dev). The PR head is a dedicated `backmerge/…` branch — never
-   `hotfix/…` itself, whose every push uploads a displacing RC. Expect a
-   version-file conflict on the back-merge — dev is on the next minor;
-   resolve it keeping dev's version.
+   `hotfix/…` itself, whose every push uploads a displacing RC. The train
+   pre-resolves the version files on `backmerge/…` to dev's version, so
+   the PR carries only the fix; a conflict now means real content
+   collided — resolve it manually (keep dev's version if version files
+   are involved).
 6. **Press the store buttons.**
 
 Rerun-safe: re-dispatching the same hotfix reconciles (manifest kind and
@@ -349,7 +351,8 @@ re-dispatch with `force: true` to converge.
 | Promotion run failed midway / never fired | transient error, or the caller workflows landed after the merge | Re-run the failed run, or Actions → "Promote Release" → dispatch with the version — everything converges. |
 | Promote queued run disappeared | a third run entered the shared store concurrency group (GitHub cancels the pending slot) | Dispatch "Promote Release" with the version. (not yet observed) |
 | Hotfix: `<tag> is not the latest tag on <repo>` | trying to hotfix an old release line | Only the latest release can be hotfixed; ship a normal train instead. |
-| Back-merge PR conflicts | expected: dev is on the next minor, both touched version files | Resolve on the back-merge PR keeping DEV's version. |
+| Back-merge PR conflicts | real content collided (the train pre-resolves version files on `backmerge/…` to dev's version) | Resolve on the back-merge PR; keep DEV's version if version files are involved. |
+| `<version file> has uncommitted changes` on promote | a manual `--app-dir` run in a checkout with local edits to the version file (the back-merge build commits that file) | Commit or discard the local edits, then re-run promotion. |
 | Bump commit: `Author identity unknown` | bot git identity not configured in a fresh clone | Fixed in the tool (regression-tested); if seen, update the pinned train. |
 | `Merge method X is not allowed on this repository` warning | repo forbids that merge method | Tool falls back SQUASH→MERGE→REBASE; if all fail, arm manually: `gh pr merge <n> --auto --merge`. |
 | iOS: `No matching provisioning profiles found ... readonly` | a lane requests a bundle id whose profile isn't in convos-certificates (check the match error's "available profiles" list) | Add the id to convos-ios `fastlane/Matchfile`, register the App ID if new (`fastlane produce --skip_itc -a <id>`), run `fastlane ios sync_match type:appstore`. |

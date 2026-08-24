@@ -103,16 +103,19 @@ module Train
       end
 
       layout, path = layout_for(dir)
-      case layout
-      when :android
-        content = File.read(path)
-        updated = content.sub(/^VERSION_NAME=.*$/, "VERSION_NAME=#{new_version}")
-        File.write(path, updated)
-      when :ios
-        content = File.read(path)
-        updated = content.gsub(/MARKETING_VERSION = [0-9][0-9.]*;/, "MARKETING_VERSION = #{new_version};")
-        File.write(path, updated)
-      end
+      content = File.read(path)
+      updated =
+        case layout
+        when :android
+          content.sub(/^VERSION_NAME=.*$/, "VERSION_NAME=#{new_version}")
+        when :ios
+          content.gsub(/MARKETING_VERSION = [0-9][0-9.]*;/, "MARKETING_VERSION = #{new_version};")
+        end
+      # Prove the rewrite before it lands: these are app-owned files (the
+      # pbxproj especially is dense generated state), so any changed line
+      # that isn't a whole version line aborts the write.
+      assert_version_lines_only!(layout, content, updated)
+      File.write(path, updated)
 
       # Post-bump verify, mirroring the bash's own re-read check.
       verify = read_versions(layout, path).uniq
@@ -122,6 +125,32 @@ module Train
 
       new_version
     end
+
+    # The full-line shape a version line may take, per layout. bump uses
+    # these to PROVE its regex rewrite touched nothing else — e.g. the
+    # version pattern embedded inside some other setting's value must fail
+    # loud, never be silently rewritten.
+    VERSION_LINE_RE = {
+      android: /\AVERSION_NAME=.*\z/,
+      ios: /\A\s*MARKETING_VERSION = [0-9][0-9.]*;\s*\z/
+    }.freeze
+
+    def assert_version_lines_only!(layout, before, after)
+      old_lines = before.lines
+      new_lines = after.lines
+      unless old_lines.size == new_lines.size
+        raise Error, "bump changed the line count (#{old_lines.size} -> #{new_lines.size})"
+      end
+
+      pattern = VERSION_LINE_RE.fetch(layout)
+      old_lines.zip(new_lines).each_with_index do |(old, new), index|
+        next if old == new
+        next if old.chomp.match?(pattern) && new.chomp.match?(pattern)
+
+        raise Error, "bump would change a non-version line (line #{index + 1}: #{old.chomp.strip[0, 60].inspect})"
+      end
+    end
+    private_class_method :assert_version_lines_only!
 
     # read_versions: raw extraction (may return >1 distinct value for ios;
     # read() is the one that enforces agreement).

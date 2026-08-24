@@ -90,7 +90,7 @@ module Train
       # the manifest untouched rather than record a promotion whose back-merge
       # never happened. Rerun cases are tolerated (see the method).
       if kind == "hotfix"
-        yield open_back_merge_pr(repo: repo, version: version, kind: kind)
+        yield open_back_merge_pr(repo: repo, version: version, kind: kind, app_dir: app_dir)
       elsif kind == "release"
         yield ensure_release_back_merge(repo: repo, version: version, app_dir: app_dir)
       end
@@ -153,15 +153,17 @@ module Train
     # The PR head is a dedicated backmerge/<version> branch at the source
     # branch's tip, NEVER release/<v> or hotfix/<v> themselves: the app
     # repos' RC-upload workflows run on every push to those branches, and
-    # create_ref fires a real push event — recreating a source branch that
-    # delete-branch-on-merge removed uploaded a NEW store build of the
-    # just-promoted version, displacing the recorded RC (the 2.5.0 ghost
-    # build). Conflict-resolution pushes land on backmerge/<v> too, where
-    # they equally trigger nothing.
-    def open_back_merge_pr(repo:, version:, kind:)
+    # recreating a source branch that delete-branch-on-merge removed (a
+    # branch creation fires a real push event) uploaded a NEW store build
+    # of the just-promoted version, displacing the recorded RC (the 2.5.0
+    # ghost build). Conflict-resolution pushes land on backmerge/<v> too,
+    # where they equally trigger nothing. Before the PR opens, the branch's
+    # version files are pre-resolved to DEV's version (see
+    # build_backmerge_branch) so merging can never regress dev's version.
+    def open_back_merge_pr(repo:, version:, kind:, app_dir:)
       source = "#{kind}/#{version}"
       branch = "backmerge/#{version}"
-      yield ensure_backmerge_branch(repo: repo, branch: branch, source: source)
+      yield ensure_backmerge_branch(repo: repo, branch: branch, source: source, app_dir: app_dir)
 
       number = @gh.pr_create(
         repo: repo, base: "dev", head: branch,
@@ -174,7 +176,9 @@ module Train
       # no number) is resolved against base dev inside pr_merge_auto.
       arm_true_merge(repo: repo, pr: number || branch)
       Success(:ok)
-    rescue Github::ApiError => e
+    # CommandError too: building the backmerge branch runs local git, whose
+    # failures must abort record as a Result, never escape as an exception.
+    rescue Github::ApiError, Github::CommandError => e
       if TOLERATED_BACK_MERGE_ERRORS.any? { |m| e.message.downcase.include?(m) }
         @out.puts "train: back-merge for #{repo}@#{branch}: #{e.message} (tolerated)"
         # The PR from a prior run may be sitting un-armed (e.g. that run died
@@ -209,7 +213,7 @@ module Train
     def ensure_release_back_merge(repo:, version:, app_dir:)
       return Success(:ok) unless release_needs_back_merge?(repo: repo, dir: app_dir, version: version)
 
-      open_back_merge_pr(repo: repo, version: version, kind: "release")
+      open_back_merge_pr(repo: repo, version: version, kind: "release", app_dir: app_dir)
     rescue Github::ApiError, Github::CommandError => e
       Failure("release back-merge check failed for #{repo}: #{e.message}")
     end
@@ -308,24 +312,100 @@ module Train
       merged ? merged["head-sha"].to_s : ""
     end
 
-    # Create backmerge/<version> at `source`'s tip — the live branch tip
-    # when it survived its PR's merge, else the merged PR's recorded head
-    # sha (the tag is the MERGE commit, not the tip, so the PR record is
-    # the authoritative fallback). An EXISTING backmerge branch is used
-    # exactly as-is: a rerun may find a human's conflict-resolution pushes
-    # on it, which must never be clobbered.
-    def ensure_backmerge_branch(repo:, branch:, source:)
-      return Success(:ok) if @gh.branch_exists?(repo, branch)
-
-      tip = @gh.branch_sha(repo, source)
-      tip = merged_pr_head_sha(repo: repo, branch: source) if tip.empty?
+    # Ensure backmerge/<version> exists AND cannot regress dev's version.
+    #
+    # An existing branch is validated, never trusted: a branch left by an
+    # older train (or an interrupted run) can still carry the pure version
+    # downgrade this whole path exists to prevent, so it is built from ITS
+    # OWN tip — append-only, so a human's conflict-resolution commits are
+    # preserved and the push stays a fast-forward. A fresh branch is built
+    # from `source`'s tip: the live branch when it survived its PR's merge,
+    # else the merged PR's recorded head sha (the tag is the MERGE commit,
+    # not the tip, so the PR record is the authoritative fallback).
+    def ensure_backmerge_branch(repo:, branch:, source:, app_dir:)
+      tip = @gh.branch_sha(repo, branch)
+      if tip.empty?
+        tip = @gh.branch_sha(repo, source)
+        tip = merged_pr_head_sha(repo: repo, branch: source) if tip.empty?
+      end
       if tip.empty?
         return Failure("#{source} is gone on #{repo} and no merged PR records its head sha — create #{branch} at the back-merge tip manually, then re-run")
       end
 
-      @gh.create_ref(repo, branch: branch, sha: tip)
-      @out.puts "#{repo}: created #{branch} @ #{tip} (back-merge head for #{source})"
+      build_backmerge_branch(repo: repo, branch: branch, source: source, tip: tip, app_dir: app_dir)
+    end
+
+    # Build the back-merge head at `tip` and push it in ONE step, with the
+    # version files pre-resolved to whatever dev currently holds. The 2.5.0
+    # release line carried version-reset commits (dev had been merged in
+    # repeatedly), so its back-merge PR was a clean-merging pure version
+    # downgrade — armed auto-merge would have applied it to dev; only a red
+    # version check stopped it. Resetting the versions on the PR head makes
+    # that merge unrepresentable, and turns the documented "resolve the
+    # version conflict keeping dev's" toil into a no-op for both kinds.
+    #
+    # The checkout is DETACHED and the push is `HEAD:refs/heads/<branch>`:
+    # no local branch is created or reset, so a same-named local branch in
+    # the caller's checkout can never be force-moved (and origin never sees
+    # a head that could still regress dev). An already-safe branch needs no
+    # push at all.
+    def build_backmerge_branch(repo:, branch:, source:, tip:, app_dir:)
+      # The version surgery commits and pushes from app_dir, so the same
+      # miswired-manual-run guard as the release gate applies to both kinds.
+      # Absolute: --app-dir is passed through verbatim, and `git -C <dir>`
+      # resolves pathspecs from inside <dir>, where a caller-relative path
+      # would miss the file it names.
+      app_dir = File.expand_path(app_dir)
+      assert_checkout_is(repo: repo, dir: app_dir)
+
+      # Dry-run stops HERE: everything below rewrites and detaches the
+      # caller's checkout, which mutate!'s remote-only gating wouldn't undo.
+      if @gh.dry_run
+        @out.puts "[dry-run] would build #{branch} @ #{tip} on #{repo} (version pre-resolved to dev's)"
+        return Success(:ok)
+      end
+
+      dev_sha = @gh.ls_remote(app_dir, "refs/heads/dev")
+      raise Github::ApiError, "no dev branch on #{repo} — cannot build #{branch}" if dev_sha.to_s.empty?
+
+      version_file = Versions.layout_for(app_dir).last
+      if @gh.dirty?(app_dir, version_file)
+        return Failure("#{repo}: #{version_file} has uncommitted changes — commit or discard them, then re-run")
+      end
+
+      @gh.fetch(app_dir, dev_sha)
+      @gh.fetch(app_dir, tip)
+      @gh.checkout(app_dir, dev_sha)
+      dev_version = Versions.read(app_dir)
+      @gh.checkout(app_dir, tip)
+
+      if Versions.read(app_dir) == dev_version
+        @out.puts "#{repo}: #{branch} @ #{tip} already carries dev's version #{dev_version}"
+        return Success(:ok) if @gh.branch_exists?(repo, branch)
+      else
+        @gh.git_config_bot(app_dir)
+        Versions.bump(app_dir, dev_version)
+        # Commit ONLY the version file: bump has already proven its rewrite
+        # touched nothing but version lines, and the path-scoped commit
+        # keeps any other index/worktree state out of what gets pushed.
+        @gh.commit(app_dir, "train: keep dev's version #{dev_version} on #{branch}",
+                   paths: [version_file])
+        @out.puts "#{repo}: reset versions to #{dev_version} on #{branch}"
+      end
+
+      unless @gh.push(app_dir, "HEAD:refs/heads/#{branch}")
+        return Failure("#{repo}: pushing #{branch} was rejected (moved concurrently?) — re-run")
+      end
+
+      @out.puts "#{repo}: pushed #{branch} @ #{tip} (back-merge head for #{source})"
       Success(:ok)
+    rescue Versions::Error => e
+      Failure("#{repo}: version pre-resolution on #{branch} failed: #{e.message}")
+    # record's contract is a Result, not an exception: the version surgery
+    # touches the filesystem directly (read/write/stat), so its Errno and
+    # IOError failures must abort as a Failure before the manifest write.
+    rescue SystemCallError, IOError => e
+      Failure("#{repo}: back-merge build of #{branch} failed: #{e.message}")
     end
 
     # Platform: the per-platform facts keyed off an app repo's name suffix.
