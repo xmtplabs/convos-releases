@@ -590,12 +590,14 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "hotfix/#{VERSION}" }
-    refute_nil back_merge, "expected a back-merge pr_create call for hotfix/#{VERSION}"
+    back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" }
+    refute_nil back_merge, "expected a back-merge pr_create call from backmerge/#{VERSION}"
     assert_equal "dev", back_merge.kwargs[:base]
     assert_equal REPO, back_merge.kwargs[:repo]
     assert_match(/back-merge hotfix #{VERSION}/i, back_merge.kwargs[:title])
     assert_match(/conflict/i, back_merge.kwargs[:body])
+    # The body must still name the source branch being carried into dev.
+    assert_match(%r{hotfix/#{VERSION}}, back_merge.kwargs[:body])
   end
 
   # A squash strips the ancestry the back-merge carries, so record arms
@@ -616,12 +618,12 @@ class PromoteTest < Minitest::Test
 
   def test_record_back_merge_pr_already_exists_still_arms_auto_merge
     stub_releases_clone(kind: "hotfix")
-    @gh.fail_pr_create(REPO, message: "A pull request already exists for hotfix/#{VERSION}.")
+    @gh.fail_pr_create(REPO, message: "A pull request already exists for backmerge/#{VERSION}.")
 
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    arm = @gh.calls_for(:pr_merge_auto).find { |c| c.kwargs[:head_or_number] == "hotfix/#{VERSION}" }
+    arm = @gh.calls_for(:pr_merge_auto).find { |c| c.kwargs[:head_or_number] == "backmerge/#{VERSION}" }
     refute_nil arm, "an existing back-merge PR must still get auto-merge re-armed"
     assert_equal ["MERGE"], arm.kwargs[:methods]
     # Branch resolution must pin base dev — this head also has a PR to main.
@@ -668,8 +670,8 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" }
-    refute_nil back_merge, "expected a release/#{VERSION} -> dev back-merge PR"
+    back_merge = @gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" }
+    refute_nil back_merge, "expected a backmerge/#{VERSION} -> dev back-merge PR"
     assert_equal "dev", back_merge.kwargs[:base]
     assert_equal REPO, back_merge.kwargs[:repo]
     assert_match(/back-merge release #{VERSION}/i, back_merge.kwargs[:title])
@@ -686,7 +688,7 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" },
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" },
                "an empty-author commit must not be treated as the bot")
   end
 
@@ -733,7 +735,7 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "release/#{VERSION}" },
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" },
                "a deleted-but-diverged release branch must still back-merge via its merged PR tip")
   end
 
@@ -820,10 +822,46 @@ class PromoteTest < Minitest::Test
     refute @gh.called?(:commit), "a hard back-merge failure must abort before any manifest commit"
   end
 
-  # ---- back-merge: branch restored when delete-on-merge removed it ----
+  # ---- back-merge: the PR head is backmerge/<v>, never release/hotfix ----
 
-  def test_record_restores_deleted_hotfix_branch_before_back_merge
+  # The regression lock for the 2.5.0 ghost RC: the app repos' RC-upload
+  # workflows trigger on every push to release/<v> and hotfix/<v>, and
+  # create_ref fires a real push event — so recreating a merge-deleted
+  # source branch uploaded a NEW store build of the version that had just
+  # promoted, displacing the recorded RC. record must never create those
+  # refs; the back-merge PR opens from a dedicated backmerge/<v> branch.
+  def test_record_never_recreates_release_or_hotfix_branches
     stub_releases_clone(kind: "hotfix")
+    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
+    @gh.stub_pr_list(repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
+                     result: [{ "merged_at" => "2026-07-15T00:00:00Z", "head-sha" => "hotfix-tip-sha" }])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    offending = @gh.calls_for(:create_ref).select { |c| c.kwargs[:branch].start_with?("release/", "hotfix/") }
+    assert_empty offending, "record must never recreate an RC-triggering branch"
+    assert(@gh.calls_for(:pr_create).all? { |c| c.kwargs[:head] == "backmerge/#{VERSION}" })
+  end
+
+  def test_record_creates_backmerge_branch_at_the_live_source_tip
+    stub_releases_clone(kind: "hotfix")
+    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    @gh.stub_branch_sha(REPO, "hotfix/#{VERSION}", "hotfix-live-tip")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    created = @gh.calls_for(:create_ref).first
+    refute_nil created, "an absent backmerge branch must be created before the PR"
+    assert_equal "backmerge/#{VERSION}", created.kwargs[:branch]
+    assert_equal "hotfix-live-tip", created.kwargs[:sha]
+  end
+
+  def test_record_backmerge_branch_falls_back_to_merged_pr_tip_when_source_deleted
+    stub_releases_clone(kind: "hotfix")
+    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(
       repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
@@ -834,23 +872,36 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    restore = @gh.calls_for(:create_ref).first
-    refute_nil restore, "the deleted branch must be recreated before the back-merge PR"
-    assert_equal "hotfix/#{VERSION}", restore.kwargs[:branch]
-    assert_equal "hotfix-tip-sha", restore.kwargs[:sha]
+    created = @gh.calls_for(:create_ref).first
+    refute_nil created, "the backmerge branch must be created from the merged PR's recorded tip"
+    assert_equal "backmerge/#{VERSION}", created.kwargs[:branch]
+    assert_equal "hotfix-tip-sha", created.kwargs[:sha]
     assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
   end
 
-  def test_record_fails_loud_when_deleted_branch_cannot_be_restored
+  # A rerun (or a died run) may find backmerge/<v> already on origin — with
+  # a human's conflict-resolution pushes on it. It must be used as-is.
+  def test_record_leaves_an_existing_backmerge_branch_untouched
     stub_releases_clone(kind: "hotfix")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute @gh.called?(:create_ref), "an existing backmerge branch must not be clobbered"
+    assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:head] == "backmerge/#{VERSION}" })
+  end
+
+  def test_record_fails_loud_when_the_backmerge_tip_cannot_be_resolved
+    stub_releases_clone(kind: "hotfix")
+    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all", result: [])
 
     result = new_promote.record(**record_args)
 
     assert_instance_of Dry::Monads::Result::Failure, result
-    assert_match(/restore the branch manually/, result.failure)
-    refute @gh.called?(:commit), "an unrestorable back-merge must abort before any manifest write"
+    assert_match(%r{create backmerge/#{VERSION}.*manually}, result.failure)
+    refute @gh.called?(:commit), "an unresolvable back-merge tip must abort before any manifest write"
   end
 
   # ---- back-merge tolerances: rerun-safe outcomes still succeed ----

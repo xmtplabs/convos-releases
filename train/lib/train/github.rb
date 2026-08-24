@@ -232,9 +232,23 @@ module Train
       raise ApiError.new("branch(#{repo}, #{branch}): #{e.message}", cause: e)
     end
 
-    # create_ref: creates refs/heads/<branch> at `sha` — used to restore a
-    # branch that GitHub's delete-branch-on-merge removed when a later step
-    # (the hotfix back-merge PR) still needs it as a PR head.
+    # branch_sha: the tip commit sha of refs/heads/<branch> on `repo`, or ""
+    # when the branch doesn't exist. Read-only; same raw-client +
+    # rescue-ordering shape as release_exists? (api! would swallow the
+    # NotFound we branch on).
+    def branch_sha(repo, branch)
+      client.branch(repo, branch).dig(:commit, :sha).to_s
+    rescue Octokit::NotFound
+      ""
+    rescue Octokit::Error => e
+      raise ApiError.new("branch(#{repo}, #{branch}): #{e.message}", cause: e)
+    end
+
+    # create_ref: creates refs/heads/<branch> at `sha` — used to create the
+    # backmerge/<version> PR head. NB: this fires a REAL push event in the
+    # target repo (the token is the conductor app, not a workflow's
+    # GITHUB_TOKEN), so only ever create branch names no workflow trigger
+    # matches — recreating release/<v> re-uploaded a displacing RC once.
     def create_ref(repo, branch:, sha:)
       mutate!("create_ref #{repo} #{branch} @ #{sha}") do
         api! { client.create_ref(repo, "heads/#{branch}", sha) }

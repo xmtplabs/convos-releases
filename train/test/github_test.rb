@@ -281,6 +281,36 @@ class GithubTest < Minitest::Test
     assert_match(/release_for_tag\(o\/r, v2\.1\.0\)/, error.message)
   end
 
+  # ---- branch_sha: tip sha, "" when absent, ApiError otherwise ----
+
+  def test_branch_sha_returns_the_tip_commit_sha
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "release/2.1.0", result: { commit: { sha: "tipsha" } })
+    gh = Train::Github.new(client: client)
+
+    assert_equal "tipsha", gh.branch_sha("o/r", "release/2.1.0")
+  end
+
+  def test_branch_sha_empty_when_branch_absent
+    client = FakeOctokitClient.new
+    gh = Train::Github.new(client: client)
+
+    # unstubbed: the fake raises a REAL Octokit::NotFound, which must come
+    # back as "" — NOT an ApiError (same rescue-ordering as release_exists?).
+    assert_equal "", gh.branch_sha("o/r", "release/2.1.0")
+  end
+
+  def test_branch_sha_wraps_non_404_errors_in_api_error
+    client = FakeOctokitClient.new
+    client.stub_branch(repo: "o/r", branch: "release/2.1.0", result: :error)
+    gh = Train::Github.new(client: client)
+
+    error = assert_raises(Train::Github::ApiError) do
+      gh.branch_sha("o/r", "release/2.1.0")
+    end
+    assert_match(%r{branch\(o/r, release/2\.1\.0\)}, error.message)
+  end
+
   # ---- pr_merge_auto: resolves node_id then posts the GraphQL mutation ----
 
   def test_pr_merge_auto_by_head_resolves_pr_then_enables_auto_merge

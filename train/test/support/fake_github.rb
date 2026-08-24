@@ -163,10 +163,17 @@ class FakeGithub
     (@pr_list_failures ||= {})[repo] = message
   end
 
-  # stub_branch_missing: scripts branch_exists?(repo, branch) to return
-  # false — tests default to true (the branch survived its PR's merge).
+  # stub_branch_missing: scripts branch_exists?(repo, branch) to false and
+  # branch_sha to "" — tests default to "exists" (the branch survived its
+  # PR's merge).
   def stub_branch_missing(repo, branch)
     (@missing_branches ||= {})[[repo, branch]] = true
+  end
+
+  # stub_branch_sha: scripts branch_sha(repo, branch)'s tip sha; unstubbed
+  # existing branches default to a deterministic "sha-<branch>".
+  def stub_branch_sha(repo, branch, sha)
+    (@branch_shas ||= {})[[repo, branch]] = sha
   end
 
   # ---- Github interface ----
@@ -435,6 +442,15 @@ class FakeGithub
   def branch_exists?(repo, branch)
     record(:branch_exists?, [repo, branch])
     !(@missing_branches || {})[[repo, branch]]
+  end
+
+  # branch_sha: read-only tip lookup, sharing @missing_branches with
+  # branch_exists? so the fake keeps one source of truth for branch state.
+  def branch_sha(repo, branch)
+    record(:branch_sha, [repo, branch])
+    return "" if (@missing_branches || {})[[repo, branch]]
+
+    (@branch_shas || {})[[repo, branch]] || "sha-#{branch}"
   end
 
   def create_ref(repo, branch:, sha:)
