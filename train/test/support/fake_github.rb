@@ -290,12 +290,22 @@ class FakeGithub
     end
   end
 
+  # stub_checkout_content: registers a writer applied whenever checkout(dir,
+  # ref) or checkout_branch(dir, _branch, ref) lands on `ref` for this
+  # clone's directory basename — models the working tree changing across
+  # checkouts (the real seam is a real `git checkout`).
+  def stub_checkout_content(dir_suffix, ref, &writer)
+    (@checkout_contents ||= {})[[dir_suffix, ref]] = writer
+  end
+
   def checkout(dir, ref)
     record(:checkout, [dir, ref])
+    (@checkout_contents || {})[[suffix(dir), ref]]&.call(dir)
   end
 
   def checkout_branch(dir, branch, sha)
     record(:checkout_branch, [dir, branch, sha])
+    (@checkout_contents || {})[[suffix(dir), sha]]&.call(dir)
   end
 
   def pr_list(repo:, head: nil, base: nil, state: "open")
@@ -320,8 +330,8 @@ class FakeGithub
     record(:add, [dir, path])
   end
 
-  def commit(dir, message, all: false)
-    record(:commit, [dir, message], { all: all })
+  def commit(dir, message, all: false, paths: nil)
+    record(:commit, [dir, message], { all: all, paths: paths })
     if @commit_failure && message.include?(@commit_failure[:match])
       raise ::Train::Github::CommandError.new(
         ["git", "commit", "-m", message], stdout: "", stderr: @commit_failure[:message], status: fake_failed_status
@@ -437,8 +447,7 @@ class FakeGithub
   end
 
   # branch_exists?: read-only; defaults to true unless scripted via
-  # stub_branch_missing. create_ref flips it back to true so an
-  # ensure-state restore-then-recheck converges like the real seam.
+  # stub_branch_missing.
   def branch_exists?(repo, branch)
     record(:branch_exists?, [repo, branch])
     !(@missing_branches || {})[[repo, branch]]
@@ -451,13 +460,6 @@ class FakeGithub
     return "" if (@missing_branches || {})[[repo, branch]]
 
     (@branch_shas || {})[[repo, branch]] || "sha-#{branch}"
-  end
-
-  def create_ref(repo, branch:, sha:)
-    record(:create_ref, [repo], { branch: branch, sha: sha })
-    return if @dry_run
-
-    (@missing_branches || {}).delete([repo, branch])
   end
 
   def create_release(repo, tag:, name:, body:)
@@ -488,6 +490,28 @@ class FakeGithub
 
   def set_dirty(value)
     @dirty = value
+  end
+
+  # staged?: index-vs-HEAD for one path — the half dirty? can't see.
+  # Defaults to false (nothing staged) so only tests that care opt in.
+  def staged?(dir, path)
+    record(:staged?, [dir, path])
+    @staged || false
+  end
+
+  def set_staged(value)
+    @staged = value
+  end
+
+  # head_ref: the caller's current branch name (or sha when detached), so
+  # the back-merge build can put the checkout back where it found it.
+  def head_ref(dir)
+    record(:head_ref, [dir])
+    (@head_refs || {})[suffix(dir)] || "original-head"
+  end
+
+  def stub_head_ref(dir_suffix, ref)
+    (@head_refs ||= {})[dir_suffix] = ref
   end
 
   # ---- assertion helpers ----

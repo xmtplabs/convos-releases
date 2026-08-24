@@ -244,21 +244,28 @@ module Train
       raise ApiError.new("branch(#{repo}, #{branch}): #{e.message}", cause: e)
     end
 
-    # create_ref: creates refs/heads/<branch> at `sha` — used to create the
-    # backmerge/<version> PR head. NB: this fires a REAL push event in the
-    # target repo (the token is the conductor app, not a workflow's
-    # GITHUB_TOKEN), so only ever create branch names no workflow trigger
-    # matches — recreating release/<v> re-uploaded a displacing RC once.
-    def create_ref(repo, branch:, sha:)
-      mutate!("create_ref #{repo} #{branch} @ #{sha}") do
-        api! { client.create_ref(repo, "heads/#{branch}", sha) }
-      end
-    end
-
-    # True if `path` has uncommitted changes. Read-only.
+    # True if `path` has uncommitted changes. Read-only. NB: this compares
+    # the WORKTREE to the index only — a change that was edited and then
+    # `git add`ed looks clean here; pair with staged? to cover both.
     def dirty?(dir, path)
       _out, _err, status = run(["git", "-C", dir, "diff", "--quiet", "--", path])
       !status.success?
+    end
+
+    # True if `path` has staged (index-vs-HEAD) changes — the half dirty?
+    # cannot see. Read-only.
+    def staged?(dir, path)
+      _out, _err, status = run(["git", "-C", dir, "diff", "--cached", "--quiet", "--", path])
+      !status.success?
+    end
+
+    # The checkout's current branch name, or its HEAD sha when detached —
+    # what a caller needs to restore the checkout after detaching it.
+    def head_ref(dir)
+      out, _err, status = run(["git", "-C", dir, "symbolic-ref", "--quiet", "--short", "HEAD"])
+      return out.strip if status.success? && !out.strip.empty?
+
+      rev_parse(dir)
     end
 
     # `git checkout -B branch sha` — creates/resets a local branch. Local-only
@@ -299,13 +306,18 @@ module Train
       mutate!("git add #{path} (#{dir})") { run!(["git", "-C", dir, "add", path]) }
     end
 
-    # `git commit [-a] -m message`. Returns true if a commit was made, false if
-    # there was nothing to commit (no-change-ok, like the bash's `|| exit 0`).
-    def commit(dir, message, all: false)
+    # `git commit [-a] -m message [-- paths]`. Returns true if a commit was
+    # made, false if there was nothing to commit (no-change-ok, like the
+    # bash's `|| exit 0`). `paths` scopes the commit to those pathspecs,
+    # committing their worktree state and NOTHING else — an index holding
+    # unrelated staged files (a manual run in a dirty checkout) cannot ride
+    # along, which a bare `git commit` would allow.
+    def commit(dir, message, all: false, paths: nil)
       mutate!("git commit #{message.inspect} (#{dir})", default: true) do
         args = ["git", "-C", dir, "commit"]
         args << "-a" if all
         args += ["-m", message]
+        args += ["--", *paths] if paths && !paths.empty?
         out, err, status = run(args)
         next true if status.success?
         # "nothing to commit" is success (no-change-ok); anything else is a

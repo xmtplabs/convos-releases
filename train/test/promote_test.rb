@@ -3,6 +3,7 @@
 require_relative "test_helper"
 require "tmpdir"
 require "fileutils"
+require "pathname"
 require "dry/monads"
 require "train/promote"
 require "train/manifest"
@@ -381,17 +382,24 @@ class PromoteTest < Minitest::Test
         repos: repos
       )
     end
-    # Every release promotion now runs the back-merge guard against app_dir.
-    # Default it to the common "no divergence" path: dev and release resolve to
-    # the SAME sha, so the dev..tip range is empty -> no PR. Divergence tests
-    # override via stub_release_divergence.
-    return unless kind == "release"
-
+    # Every back-merge (both kinds) now builds/validates the backmerge branch
+    # from app_dir: it needs a repo-identity origin, a resolvable dev, a
+    # version file, and a clean-version-file answer from dirty?. Default to
+    # the safe path: every ref reads the same planted version -> no reset.
     app = File.basename(@app_dir)
     gh.stub_remote_url(app, "https://github.com/#{repos.keys.first}.git")
-    gh.stub_ls_remote(app, "refs/heads/dev", "samesha")
-    gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "samesha")
-    gh.stub_commit_authors(app, "samesha..samesha", [])
+    gh.set_dirty(false)
+    plant_pbxproj(@app_dir, VERSION)
+    if kind == "release"
+      # Default the release gate to the common "no divergence" path: dev and
+      # release resolve to the SAME sha, so the dev..tip range is empty -> no
+      # PR. Divergence tests override via stub_release_divergence.
+      gh.stub_ls_remote(app, "refs/heads/dev", "samesha")
+      gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "samesha")
+      gh.stub_commit_authors(app, "samesha..samesha", [])
+    else
+      gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    end
   end
 
   def write_notes(app_dir: @app_dir, ios: nil, android: nil)
@@ -822,17 +830,41 @@ class PromoteTest < Minitest::Test
     refute @gh.called?(:commit), "a hard back-merge failure must abort before any manifest commit"
   end
 
+  IOS_VERSION_REL_PATH = "Convos.xcodeproj/project.pbxproj"
+
+  # Plants a minimal pbxproj so the back-merge build's Versions.read/bump
+  # operate on real file content; the fake's checkouts swap it per ref via
+  # stub_checkout_content.
+  def plant_pbxproj(dir, version)
+    path = File.join(dir, IOS_VERSION_REL_PATH)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "\t\t\t\tMARKETING_VERSION = #{version};\n")
+  end
+
+  # Wires the fresh-build back-merge path for a hotfix record: backmerge
+  # branch absent on origin, per-ref version contents materialized by the
+  # fake's checkouts. tip_ref is the sha the build checks out (defaults to
+  # the live hotfix tip the fake's branch_sha reports). Assumes
+  # stub_releases_clone(kind: "hotfix") already ran.
+  def stub_backmerge_build(dev_version: "2.1.0", tip_version: "2.1.0", tip_ref: "sha-hotfix/#{VERSION}")
+    app = File.basename(@app_dir)
+    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    plant_pbxproj(@app_dir, tip_version)
+    @gh.stub_checkout_content(app, "devsha") { |d| plant_pbxproj(d, dev_version) }
+    @gh.stub_checkout_content(app, tip_ref) { |d| plant_pbxproj(d, tip_version) }
+  end
+
   # ---- back-merge: the PR head is backmerge/<v>, never release/hotfix ----
 
   # The regression lock for the 2.5.0 ghost RC: the app repos' RC-upload
   # workflows trigger on every push to release/<v> and hotfix/<v>, and
-  # create_ref fires a real push event — so recreating a merge-deleted
-  # source branch uploaded a NEW store build of the version that had just
-  # promoted, displacing the recorded RC. record must never create those
-  # refs; the back-merge PR opens from a dedicated backmerge/<v> branch.
+  # creating a branch fires a real push event — so recreating a
+  # merge-deleted source branch uploaded a NEW store build of the version
+  # that had just promoted, displacing the recorded RC. record must never
+  # write those refs; the PR opens from a dedicated backmerge/<v> branch.
   def test_record_never_recreates_release_or_hotfix_branches
     stub_releases_clone(kind: "hotfix")
-    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    stub_backmerge_build(tip_ref: "hotfix-tip-sha")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
                      result: [{ "merged_at" => "2026-07-15T00:00:00Z", "head-sha" => "hotfix-tip-sha" }])
@@ -840,28 +872,32 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    offending = @gh.calls_for(:create_ref).select { |c| c.kwargs[:branch].start_with?("release/", "hotfix/") }
-    assert_empty offending, "record must never recreate an RC-triggering branch"
+    pushed = @gh.calls_for(:push).select { |c| c.args[1].to_s.match?(%r{:refs/heads/(release|hotfix)/}) }
+    assert_empty pushed, "record must never push to an RC-triggering branch"
+    built = @gh.calls_for(:checkout_branch).select { |c| c.args[1].to_s.start_with?("release/", "hotfix/") }
+    assert_empty built, "record must never build a local release/hotfix branch"
     assert(@gh.calls_for(:pr_create).all? { |c| c.kwargs[:head] == "backmerge/#{VERSION}" })
   end
 
-  def test_record_creates_backmerge_branch_at_the_live_source_tip
+  def test_record_builds_backmerge_branch_at_the_live_source_tip
     stub_releases_clone(kind: "hotfix")
-    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
-    @gh.stub_branch_sha(REPO, "hotfix/#{VERSION}", "hotfix-live-tip")
+    stub_backmerge_build
 
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    created = @gh.calls_for(:create_ref).first
-    refute_nil created, "an absent backmerge branch must be created before the PR"
-    assert_equal "backmerge/#{VERSION}", created.kwargs[:branch]
-    assert_equal "hotfix-live-tip", created.kwargs[:sha]
+    build = @gh.calls_for(:checkout).find { |c| c.args[1] == "sha-hotfix/#{VERSION}" }
+    refute_nil build, "the build must check out the source tip (detached)"
+    push = @gh.calls_for(:push).find { |c| c.args[1] == "HEAD:refs/heads/backmerge/#{VERSION}" }
+    refute_nil push, "the built branch must be pushed in one step — origin never sees an unreset head"
+    # Detached build: no local branch is ever created or reset, so no local
+    # branch state can be clobbered.
+    refute @gh.called?(:checkout_branch), "the build must not create or reset a local branch"
   end
 
   def test_record_backmerge_branch_falls_back_to_merged_pr_tip_when_source_deleted
     stub_releases_clone(kind: "hotfix")
-    @gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    stub_backmerge_build(tip_ref: "hotfix-tip-sha")
     @gh.stub_branch_missing(REPO, "hotfix/#{VERSION}")
     @gh.stub_pr_list(
       repo: REPO, head: "hotfix/#{VERSION}", base: "main", state: "all",
@@ -872,23 +908,229 @@ class PromoteTest < Minitest::Test
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    created = @gh.calls_for(:create_ref).first
-    refute_nil created, "the backmerge branch must be created from the merged PR's recorded tip"
-    assert_equal "backmerge/#{VERSION}", created.kwargs[:branch]
-    assert_equal "hotfix-tip-sha", created.kwargs[:sha]
+    build = @gh.calls_for(:checkout).find { |c| c.args[1] == "hotfix-tip-sha" }
+    refute_nil build, "the build must check out the merged PR's recorded tip"
     assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
   end
 
   # A rerun (or a died run) may find backmerge/<v> already on origin — with
-  # a human's conflict-resolution pushes on it. It must be used as-is.
-  def test_record_leaves_an_existing_backmerge_branch_untouched
+  # a human's conflict-resolution pushes on it. Its commits must never be
+  # discarded; a SAFE branch (version already matches dev) needs no push.
+  def test_record_existing_safe_backmerge_branch_is_not_pushed
     stub_releases_clone(kind: "hotfix")
+    # Default fake state: backmerge/<v> exists; every ref reads the planted
+    # version, so the branch already matches dev.
 
     result = new_promote.record(**record_args)
 
     assert_equal Dry::Monads::Success(true), result
-    refute @gh.called?(:create_ref), "an existing backmerge branch must not be clobbered"
+    refute(@gh.calls_for(:push).any? { |c| c.args[1].to_s.include?("backmerge/") },
+           "a safe existing backmerge branch must not be re-pushed")
     assert(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:head] == "backmerge/#{VERSION}" })
+  end
+
+  # An existing backmerge branch may be UNSAFE: the pre-#43 train created it
+  # at the raw source tip, so it can still carry the pure version downgrade.
+  # The build must validate it and APPEND a reset commit (fast-forward — a
+  # human's conflict-resolution commits survive) rather than trusting it.
+  def test_record_appends_version_reset_to_an_unsafe_existing_backmerge_branch
+    stub_releases_clone(kind: "hotfix")
+    app = File.basename(@app_dir)
+    @gh.stub_checkout_content(app, "devsha") { |d| plant_pbxproj(d, "2.2.0") }
+    @gh.stub_checkout_content(app, "sha-backmerge/#{VERSION}") { |d| plant_pbxproj(d, "2.1.1") }
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    build = @gh.calls_for(:checkout).find { |c| c.args[1] == "sha-backmerge/#{VERSION}" }
+    refute_nil build, "the existing branch's own tip must be checked out (append-only)"
+    reset = @gh.calls_for(:commit).find { |c| c.args[1].include?("keep dev's version 2.2.0") }
+    refute_nil reset, "an unsafe existing branch must get a reset commit appended"
+    refute_nil(@gh.calls_for(:push).find { |c| c.args[1] == "HEAD:refs/heads/backmerge/#{VERSION}" },
+               "the appended reset must be pushed (fast-forward)")
+  end
+
+  # ---- back-merge: version files pre-resolved to dev's version ----
+
+  # The 2.5.0 scenario (convos-ios#1416): everything on the release line was
+  # already in dev except version churn, so the back-merge PR was a pure
+  # version downgrade that a clean auto-merge would have applied to dev.
+  # The build must reset the backmerge branch's version files to dev's
+  # version so the PR can never regress dev, whatever happened on the
+  # source branch.
+  def test_record_resets_backmerge_versions_to_devs_version
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    reset = @gh.calls_for(:commit).find { |c| c.args[1].include?("keep dev's version 2.2.0") }
+    refute_nil reset, "expected a version-reset commit on the backmerge branch"
+    # Path-scoped commit, never an index sweep: a dirty manual checkout's
+    # staged files must not be able to ride along into a pushed commit.
+    assert_equal [File.join(@app_dir, IOS_VERSION_REL_PATH)], reset.kwargs[:paths]
+    refute reset.kwargs[:all], "the reset commit must never be a commit -a sweep"
+    # The reset really ran (real Versions.bump against the working tree).
+    assert_equal "2.2.0", Train::Versions.read(@app_dir)
+  end
+
+  def test_record_skips_version_reset_when_tip_matches_dev
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.1.0", tip_version: "2.1.0")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute(@gh.calls_for(:commit).any? { |c| c.args[1].include?("keep dev's version") },
+           "no reset commit when the tip already matches dev")
+    refute_nil(@gh.calls_for(:push).find { |c| c.args[1] == "HEAD:refs/heads/backmerge/#{VERSION}" },
+               "the branch must still be pushed")
+  end
+
+  # The build rewrites and commits a file in the caller's checkout, so a
+  # version file with pre-existing local edits must abort rather than push
+  # someone's uncommitted work to the back-merge head.
+  def test_record_refuses_to_build_from_a_dirty_version_file
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.set_dirty(true)
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a dirty version file must abort the back-merge build"
+    assert_match(/uncommitted changes/, result.failure)
+    refute @gh.called?(:commit), "manifest must be untouched"
+    refute(@gh.calls_for(:push).any? { |c| c.args[1].to_s.include?("backmerge/") })
+  end
+
+  # dirty? only compares worktree-vs-index, so a version file that was
+  # edited AND staged looks clean to it — and the path-scoped commit would
+  # then carry that staged edit onto the pushed head.
+  def test_record_refuses_to_build_from_a_staged_version_file
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.set_staged(true)
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a staged version-file edit must abort the back-merge build"
+    assert_match(/uncommitted changes/, result.failure)
+    refute(@gh.calls_for(:push).any? { |c| c.args[1].to_s.include?("backmerge/") })
+  end
+
+  # The build detaches app_dir to read dev's version and to sit on the
+  # back-merge tip. It must put the checkout back: `record` is the last
+  # train step in CI, but manual runs happen in a human's clone, where a
+  # silently detached HEAD strands later commits.
+  def test_record_restores_the_original_head_after_the_build
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_head_ref(File.basename(@app_dir), "my-working-branch")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_equal "my-working-branch", @gh.calls_for(:checkout).last.args[1],
+                 "the caller's original HEAD must be restored last"
+  end
+
+  def test_record_restores_the_original_head_even_when_the_build_fails
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_head_ref(File.basename(@app_dir), "my-working-branch")
+    @gh.fail_push(File.basename(@app_dir))
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?
+    assert_equal "my-working-branch", @gh.calls_for(:checkout).last.args[1],
+                 "a failed build must still restore the caller's HEAD"
+  end
+
+  # The pushed head is the reset commit, not the tip it was built from —
+  # logging `tip` would send an operator to the wrong sha.
+  def test_record_logs_the_pushed_sha_not_the_pre_reset_tip
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    @gh.stub_rev_parse(File.basename(@app_dir), "HEAD", "reset-commit-sha")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_match(/pushed backmerge\/#{VERSION} @ reset-commit-sha/, @out.string)
+    refute_match(/pushed backmerge\/#{VERSION} @ sha-hotfix/, @out.string)
+  end
+
+  # Dry-run must not leave the caller's checkout rewritten or detached: the
+  # local build is skipped entirely, not merely gated at the push.
+  def test_record_dry_run_does_not_touch_the_local_checkout
+    gh = FakeGithub.new(dry_run: true)
+    stub_releases_clone(gh, kind: "hotfix")
+    gh.stub_branch_missing(REPO, "backmerge/#{VERSION}")
+    plant_pbxproj(@app_dir, "2.1.1")
+
+    result = new_promote(gh).record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute gh.called?(:checkout), "dry-run must not check out anything in app_dir"
+    # The manifest write's own commit still runs (mutate!-gated); nothing
+    # may be committed in the APP checkout.
+    refute(gh.calls_for(:commit).any? { |c| c.args[0] == @app_dir },
+           "dry-run must not commit in app_dir")
+    assert_equal "2.1.1", Train::Versions.read(@app_dir), "dry-run must leave the version file alone"
+    assert_match(/\[dry-run\]/, @out.string)
+  end
+
+  # --app-dir is passed through verbatim, so a relative path must still
+  # produce a git-usable staged path: `git -C <dir>` resolves pathspecs from
+  # inside <dir>, where a repo-root-prefixed relative path would miss.
+  def test_record_stages_an_absolute_version_path_for_a_relative_app_dir
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    relative = Pathname.new(File.realpath(@app_dir)).relative_path_from(Pathname.pwd).to_s
+
+    result = new_promote.record(**record_args(app_dir: relative))
+
+    assert_equal Dry::Monads::Success(true), result
+    reset = @gh.calls_for(:commit).find { |c| c.args[1].include?("keep dev's version") }
+    refute_nil reset
+    assert_equal [File.join(File.realpath(@app_dir), IOS_VERSION_REL_PATH)], reset.kwargs[:paths]
+  end
+
+  # record's contract is a Result, not an exception: a filesystem failure in
+  # the version surgery must abort as a Failure before the manifest write.
+  def test_record_filesystem_failure_during_version_surgery_is_a_hard_failure
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    app = File.basename(@app_dir)
+    # The version file vanishes between the checkout and the read.
+    @gh.stub_checkout_content(app, "devsha") { |d| FileUtils.rm_rf(File.join(d, "Convos.xcodeproj")) }
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "a filesystem failure must abort record as a Failure"
+    assert_match(/back-merge|version/i, result.failure)
+    refute @gh.called?(:commit), "manifest must be untouched"
+  end
+
+  def test_record_version_reset_failure_is_a_hard_failure_before_the_manifest_write
+    stub_releases_clone(kind: "hotfix")
+    stub_backmerge_build(dev_version: "2.2.0", tip_version: "2.1.1")
+    app = File.basename(@app_dir)
+    # dev's checkout carries a split version — Versions.read must fail loud
+    # and abort record before anything is recorded.
+    @gh.stub_checkout_content(app, "devsha") do |d|
+      path = File.join(d, IOS_VERSION_REL_PATH)
+      File.write(path, "\tMARKETING_VERSION = 2.2.0;\n\tMARKETING_VERSION = 2.3.0;\n")
+    end
+
+    result = new_promote.record(**record_args)
+
+    assert result.failure?, "an unreadable dev version must abort record"
+    assert_match(/inconsistent versions/, result.failure)
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" })
+    refute @gh.called?(:commit), "manifest must be untouched"
   end
 
   def test_record_fails_loud_when_the_backmerge_tip_cannot_be_resolved
