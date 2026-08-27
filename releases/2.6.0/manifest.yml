@@ -11,6 +11,9 @@ repos:
     - sha: 3fd5089ec829ae5cb73f4ee4ced551897cd77a28
       run: https://github.com/xmtplabs/convos-ios/actions/runs/33110079339
       build-number: 1382
+    - sha: f0ff60c8ec2282e0b30b42023c97e8165a2cee1e
+      run: https://github.com/xmtplabs/convos-ios/actions/runs/33117568503
+      build-number: 1385
   xmtplabs/convos-client:
     source-sha: c538c3da6e49c49fae30e6683136d6b6e9e10f0c
     release-branch: release/2.6.0
