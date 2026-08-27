@@ -1,15 +1,15 @@
 version: 2.6.0
 kind: release
 cut-date: '2026-08-27'
-status: cut
+status: branched
 repos:
   xmtplabs/convos-ios:
     source-sha: 3fd5089ec829ae5cb73f4ee4ced551897cd77a28
     release-branch: release/2.6.0
-    status: pending
+    status: branched
     rc: []
   xmtplabs/convos-client:
     source-sha: c538c3da6e49c49fae30e6683136d6b6e9e10f0c
     release-branch: release/2.6.0
-    status: pending
+    status: branched
     rc: []
