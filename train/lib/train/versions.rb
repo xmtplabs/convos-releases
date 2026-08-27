@@ -53,13 +53,52 @@ module Train
       version
     end
 
+    # The version a train branch name claims: "release/2.6.0" -> "2.6.0".
+    # nil for anything that isn't a release/hotfix branch at a strict X.Y.Z,
+    # which callers read as "not a train branch, nothing to check" — the same
+    # release/hotfix shapes the RC uploaders trigger on.
+    def from_ref(ref)
+      match = %r{\A(?:release|hotfix)/(.+)\z}.match(ref.to_s)
+      return nil unless match
+
+      version = match[1]
+      valid?(version) ? version : nil
+    end
+
+    # Repo-relative version file per layout. layout_for resolves these
+    # against a checkout; read_content pairs them with a blob read at a
+    # given revision, where there is no worktree to stat.
+    REL_PATHS = {
+      android: File.join("android", "gradle.properties"),
+      ios: File.join("Convos.xcodeproj", "project.pbxproj")
+    }.freeze
+
     def layout_for(dir)
-      gradle = File.join(dir, "android", "gradle.properties")
-      pbxproj = File.join(dir, "Convos.xcodeproj", "project.pbxproj")
+      gradle = File.join(dir, REL_PATHS.fetch(:android))
+      pbxproj = File.join(dir, REL_PATHS.fetch(:ios))
       return [:android, gradle] if File.file?(gradle)
       return [:ios, pbxproj] if File.file?(pbxproj)
 
       raise Error, "no known version file under #{dir}"
+    end
+
+    # read_content: the validation half of read(), against content already in
+    # hand rather than a path — so a caller holding a blob from a specific
+    # revision gets the identical answer read() would give for a worktree.
+    # `label` only names the source in error messages.
+    def read_content(layout, content, label: "content")
+      versions = scan_versions(layout, content)
+      unique = versions.uniq
+      if unique.size != 1
+        raise Error, "inconsistent versions found in #{label}:\n#{versions.join("\n")}"
+      end
+
+      version = unique.first
+      unless version.match?(VERSION_RE)
+        raise Error, "bad version '#{version}'"
+      end
+
+      version
     end
 
     def read(dir)
@@ -155,7 +194,14 @@ module Train
     # read_versions: raw extraction (may return >1 distinct value for ios;
     # read() is the one that enforces agreement).
     def read_versions(layout, path)
-      content = File.read(path)
+      scan_versions(layout, File.read(path))
+    end
+
+    # The one place the version-line shapes are matched. Android is
+    # deliberately strict about `VERSION_NAME=` with no surrounding space:
+    # bump's rewrite and VERSION_LINE_RE assume that exact form, so a looser
+    # reader here would accept files the rest of the tool cannot edit.
+    def scan_versions(layout, content)
       case layout
       when :android
         content.scan(/^VERSION_NAME=(.*)$/).flatten
@@ -163,6 +209,6 @@ module Train
         content.scan(/MARKETING_VERSION = ([0-9][0-9.]*);/).flatten.uniq
       end
     end
-    private_class_method :read_versions
+    private_class_method :read_versions, :scan_versions
   end
 end

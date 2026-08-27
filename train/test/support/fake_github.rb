@@ -68,6 +68,14 @@ class FakeGithub
     @rev_parses[[dir_suffix, ref]] = sha
   end
 
+  # Blob content at a revision. Unstubbed refs raise CommandError, matching
+  # real `git show` on an unknown rev/path — the fail-closed path matters as
+  # much as the happy one here.
+  def stub_show_file(dir_suffix, sha, path, content)
+    @show_files ||= {}
+    @show_files[[dir_suffix, sha, path]] = content
+  end
+
   def stub_commit_authors(dir_suffix, range, authors)
     @commit_authors ||= {}
     @commit_authors[[dir_suffix, range]] = authors
@@ -187,6 +195,19 @@ class FakeGithub
     record(:rev_parse, [dir, ref])
     @rev_parses ||= {}
     @rev_parses[[suffix(dir), ref]] || @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
+  end
+
+  def show_file(dir, sha, path)
+    record(:show_file, [dir, sha, path])
+    @show_files ||= {}
+    content = @show_files[[suffix(dir), sha, path]]
+    if content.nil?
+      raise ::Train::Github::CommandError.new(
+        ["git", "-C", dir, "show", "#{sha}:#{path}"],
+        stdout: "", stderr: "fatal: path '#{path}' does not exist in '#{sha}'", status: nil
+      )
+    end
+    content
   end
 
   def commit_authors(dir, range)

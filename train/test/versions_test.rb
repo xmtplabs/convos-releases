@@ -117,6 +117,24 @@ class VersionsTest < Minitest::Test
     File.write(File.join(dir, "android", "gradle.properties"), "VERSION_NAME=#{version}\n")
   end
 
+  # ---- from_ref (what a train branch name claims) ----
+
+  def test_from_ref_reads_release_and_hotfix_branches
+    assert_equal "2.6.0", Train::Versions.from_ref("release/2.6.0")
+    assert_equal "2.6.1", Train::Versions.from_ref("hotfix/2.6.1")
+  end
+
+  def test_from_ref_is_nil_for_anything_that_is_not_a_train_branch
+    # The guard must stay silent on these, not fail the build.
+    [
+      "dev", "main", "feature/release/2.6.0", "release", "releases/2.6.0",
+      "release/", "release/2.6", "release/v2.6.0", "release/2.6.0-rc1",
+      "hotfix/2.06.0", "", nil
+    ].each do |ref|
+      assert_nil Train::Versions.from_ref(ref), "expected #{ref.inspect} to be rejected"
+    end
+  end
+
   def test_check_aligned_passes_when_all_agree
     android_fixture(version: "2.1.0")
     android_fixture_in(other_dir, version: "2.1.0")

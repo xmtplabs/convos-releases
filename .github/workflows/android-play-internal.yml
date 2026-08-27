@@ -83,6 +83,18 @@ jobs:
         with:
           arguments: "--accept-flake-config"
 
+      # The branch name is the train's claim about this build; the version
+      # file is what the store will actually show. They drift when a release
+      # branch is advanced to dev — that is how convos-client shipped 2.5.0
+      # stamped 2.6.0. Checked BEFORE the build: a consumed versionCode can
+      # never be reused, so failing after the upload is failing too late.
+      #
+      # No `if:` — `train check-branch-version` decides for itself whether
+      # this ref is a train branch, so the release/hotfix shapes live in one
+      # place (Versions.from_ref) instead of being restated per workflow.
+      - name: Refuse an RC whose version file disagrees with the branch
+        run: train check-branch-version --ref "$GITHUB_REF_NAME"
+
       - name: Decode prod keystore + Play service account
         env:
           PROD_KEYSTORE_B64: ${{ secrets.PROD_KEYSTORE_BASE64 }}

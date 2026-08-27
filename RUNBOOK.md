@@ -21,6 +21,7 @@ store steps — App Store Connect / Play Console access.
 
 - [The normal week (no action required)](#the-normal-week-no-action-required)
 - [AI-drafted release notes (ConvosOS)](#ai-drafted-release-notes-convosos)
+- [Keeping a release branch in sync with dev](#keeping-a-release-branch-in-sync-with-dev)
 - [Merging the train](#merging-the-train)
 - [Promotion (automatic; how to re-run)](#promotion-automatic-how-to-re-run)
 - [Hotfix: patching an already-released version](#hotfix-patching-an-already-released-version)
@@ -83,6 +84,28 @@ those notes.
   (OS_HOOK_CLIENT_ID/SECRET secrets here, token minted in the CF dashboard);
   the announcement uses a Slack bot token (SLACK_BOT_TOKEN). Rotate either by
   minting a new one and updating the repo secret.
+
+## Keeping a release branch in sync with dev
+
+Bring dev's work onto `release/x.y.z` with a **merge**, and afterwards check
+that the version file still reads `x.y.z`. Never fast-forward or reset the
+release branch to `dev`: the post-cut bump PR moves dev to the NEXT version
+within minutes of the cut, so anything that adopts dev's tip wholesale
+silently re-stamps the release. That is how convos-client shipped 2.5.0 to
+Play stamped 2.6.0 — the ledger said 2.5.0, the AAB said 2.6.0, and the two
+were never compared until a human noticed the store listing.
+
+Both RC uploaders run `train check-branch-version` before the build and
+refuse when the branch's version file disagrees with its name; promotion
+re-checks the RC's own blob before tagging. Both refuse AFTER the bad merge
+is already on the branch, so the reset is still yours to make — a merge
+(unlike a fast-forward) at least leaves the version line visible in the diff.
+
+To check by hand from an app checkout:
+
+```sh
+train check-branch-version --ref release/x.y.z    # --dir defaults to cwd
+```
 
 ## Merging the train
 
@@ -345,6 +368,9 @@ re-dispatch with `force: true` to converge.
 | `release/x.y.z exists at <sha>, expected <sha>` | a branch with that name predates the cut (e.g. a manual release branch) | Confirm it's stale with its owner, delete it, re-dispatch (reconcile completes the rest). |
 | Merge: `no RC recorded for tip <sha>` | the tip's RC upload is still running or failed | Wait for / re-run the RC upload, then comment the merge command again. |
 | Merge: `<user> lacks write on <repo>` | commenter lacks push access on one participating repo | Someone with write on BOTH repos comments instead. |
+| RC upload: `<branch> carries version <x>, but the branch claims <y>` | the release branch was advanced to `dev` (merge or fast-forward) after the post-cut bump landed, so it now carries dev's NEXT version | Reset the version file on the release branch to the branch's own version and push. Nothing was built or uploaded — `train check-branch-version` runs before the build precisely because a consumed versionCode/build number can never be reused. |
+| RC upload: `check-branch-version: inconsistent versions found` | the version file is internally split — the app's declarations disagree (the ShareExtension-stuck-at-2.0.0 class of drift). Identical duplicates are fine; only disagreement fails. | Make every declaration agree, then push. |
+| Promotion: `the RC at <sha> is version <x>, but <y> is being promoted` | same drift, reaching the last gate — the RC that was built and uploaded carries a version the train never recorded | Nothing was tagged. Fix the version file on the release branch, re-merge, and let a fresh RC build; the already-uploaded artifact is stamped `<x>` and cannot be promoted as `<y>`. |
 | Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
 | Promotion: `android release notes render to N chars (Play limit 500)` | android.md too long once rendered | Nothing was tagged or staged — the gate runs before any mutation. Pencil-edit `releases/x.y.z/android.md` on main to shorten (check the rendered length: `train` renders headers/bullets/links to plain text), then convos-client → Actions → "Promote Release" → Run workflow with the version. iOS promotion is independent and unaffected. |
 | Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |

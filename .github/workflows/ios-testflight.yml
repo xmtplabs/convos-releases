@@ -144,6 +144,12 @@ jobs:
         with:
           arguments: "--accept-flake-config --impure"
 
+      # See the twin step in android-play-internal.yml. Versions.read
+      # enforces that every MARKETING_VERSION in the pbxproj agrees, so the
+      # ShareExtension-stuck-at-2.0.0 split fails here too.
+      - name: Refuse an RC whose version file disagrees with the branch
+        run: train check-branch-version --ref "$GITHUB_REF_NAME"
+
       - name: Verify Xcode
         run: xcodebuild -version
 
