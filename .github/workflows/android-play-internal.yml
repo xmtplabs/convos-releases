@@ -67,6 +67,31 @@ jobs:
           sticky-disk: ${{ startsWith(inputs.runner, 'blacksmith') }}
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      # The branch name is the train's claim about this build; the version
+      # file is what the store will actually show. They drift when a release
+      # branch is advanced to dev — that is how convos-client shipped 2.5.0
+      # stamped 2.6.0. Checked BEFORE the build: a consumed versionCode /
+      # build number can never be reused, so failing after the upload is
+      # failing too late.
+      #
+      # `nix run`, not the dev shell's `train`: the dev shell resolves the
+      # CALLER's flake.lock, which lags this workflow (callers use @main) and
+      # is frozen at cut time on release branches — and at RELEASE-TAG time on
+      # hotfix branches, which are cut from tags. Invoking the CLI the way the
+      # append-rc step does keeps the guard on the same ref as the workflow.
+      # Same reason it sits here rather than after the dev shell: it needs
+      # only Nix, so it can fail before the expensive setup.
+      #
+      # No `if:` — `train check-branch-version` decides for itself whether
+      # this ref is a train branch, so the release/hotfix shapes live in one
+      # place (Versions.from_ref) instead of being restated per workflow.
+      - name: Refuse an RC whose version file disagrees with the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          nix run github:xmtplabs/convos-releases#train --option access-tokens "github.com=$GH_TOKEN" -- \
+            check-branch-version --ref "$GITHUB_REF_NAME"
+
       - name: Mount gradle cache sticky disk
         if: startsWith(inputs.runner, 'blacksmith')
         uses: useblacksmith/stickydisk@v1
@@ -82,18 +107,6 @@ jobs:
         uses: nicknovitski/nix-develop@v1
         with:
           arguments: "--accept-flake-config"
-
-      # The branch name is the train's claim about this build; the version
-      # file is what the store will actually show. They drift when a release
-      # branch is advanced to dev — that is how convos-client shipped 2.5.0
-      # stamped 2.6.0. Checked BEFORE the build: a consumed versionCode can
-      # never be reused, so failing after the upload is failing too late.
-      #
-      # No `if:` — `train check-branch-version` decides for itself whether
-      # this ref is a train branch, so the release/hotfix shapes live in one
-      # place (Versions.from_ref) instead of being restated per workflow.
-      - name: Refuse an RC whose version file disagrees with the branch
-        run: train check-branch-version --ref "$GITHUB_REF_NAME"
 
       - name: Decode prod keystore + Play service account
         env:

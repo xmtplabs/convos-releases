@@ -104,7 +104,12 @@ is already on the branch, so the reset is still yours to make — a merge
 To check by hand from an app checkout:
 
 ```sh
-train check-branch-version --ref release/x.y.z    # --dir defaults to cwd
+# from an app checkout; --dir defaults to cwd. `nix run` rather than the
+# dev shell's train, for the same reason the workflows use it: the dev
+# shell resolves that checkout's flake.lock, which on a release or hotfix
+# branch is frozen at cut/tag time.
+nix run github:xmtplabs/convos-releases#train -- \
+  check-branch-version --ref release/x.y.z
 ```
 
 ## Merging the train
