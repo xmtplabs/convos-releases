@@ -13,3 +13,6 @@ repos:
     release-branch: release/2.6.0
     status: branched
     rc: []
+announcement:
+  channel: C07NSHXK693
+  ts: '1787860018.355569'
