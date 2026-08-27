@@ -276,6 +276,46 @@ rescue Train::Notify::Error => e
   fail_loud(e.message)
 end
 
+# The RC uploaders' pre-build gate: a release/hotfix branch must carry the
+# version its NAME claims. Advancing such a branch to dev (merge OR
+# fast-forward) inherits dev's post-cut bump, so the build would reach the
+# store stamped one version while the whole train ledger says another —
+# convos-client shipped 2.5.0 to Play stamped 2.6.0 that way.
+#
+# Deliberately reuses Versions.read, so this agrees by construction with
+# cut, promote and bump about what a version file says: the strict
+# `VERSION_NAME=` form, and every iOS target having to agree.
+def cmd_check_branch_version(argv)
+  opts = { dir: Dir.pwd, ref: ENV["GITHUB_REF_NAME"] }
+  OptionParser.new do |o|
+    o.banner = "Usage: train check-branch-version [--ref REF_NAME] [--dir DIR]"
+    o.on("--ref REF", "branch name (default: $GITHUB_REF_NAME)") { |v| opts[:ref] = v }
+    o.on("--dir DIR", "app checkout (default: cwd)") { |v| opts[:dir] = v }
+  end.parse!(argv)
+
+  fail_loud("check-branch-version: --ref is required (or set GITHUB_REF_NAME)") if opts[:ref].to_s.empty?
+
+  claimed = Train::Versions.from_ref(opts[:ref])
+  if claimed.nil?
+    puts "check-branch-version: #{opts[:ref]} is not a release/hotfix branch — nothing to check"
+    return
+  end
+
+  actual = Train::Versions.read(opts[:dir])
+  if actual != claimed
+    fail_loud(
+      "#{opts[:ref]} carries version #{actual}, but the branch claims #{claimed}. " \
+      "This build would reach the store stamped #{actual} while the train ledger records " \
+      "#{claimed}. Advancing a release branch to dev (merge or fast-forward) drags dev's " \
+      "post-cut bump in — reset the version file to #{claimed} on #{opts[:ref]}, then re-push."
+    )
+  end
+
+  puts "check-branch-version: ok — #{opts[:ref]} carries #{actual}"
+rescue Train::Versions::Error => e
+  fail_loud("check-branch-version: #{e.message}")
+end
+
 def cmd_check_versions(argv)
   pairs = {}
   OptionParser.new do |o|
@@ -415,6 +455,7 @@ COMMANDS = {
   "notify" => method(:cmd_notify),
   "bump-version" => method(:cmd_bump_version),
   "check-versions" => method(:cmd_check_versions),
+  "check-branch-version" => method(:cmd_check_branch_version),
   "notes-lint" => method(:cmd_notes_lint),
   "status" => method(:cmd_status),
   "config" => method(:cmd_config)
@@ -424,7 +465,7 @@ command = ARGV.shift
 handler = COMMANDS[command]
 unless handler
   warn "train: unknown command '#{command}'"
-  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|notify|bump-version|check-versions|notes-lint|status|config) ..."
+  warn "usage: train (cut|hotfix|append-rc|promote|merge|seed-notes|ai-notes|notify|bump-version|check-versions|check-branch-version|notes-lint|status|config) ..."
   exit 1
 end
 

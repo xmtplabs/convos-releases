@@ -19,6 +19,19 @@ class PromoteTest < Minitest::Test
     @out = StringIO.new
     @gh = FakeGithub.new
     @app_dir = Dir.mktmpdir("train-promote-app-")
+    # A real promotion always runs against an app checkout, so the version
+    # file is always there (layout_for stats it) and the RC's blob is always
+    # readable. Default both to the agreeing version; the disagreement tests
+    # override the blob.
+    plant_pbxproj(@app_dir, VERSION)
+    stub_rc_version(VERSION)
+  end
+
+  # The version the RC at HEAD_SHA carries, as promote reads it: the blob at
+  # that sha, not the worktree.
+  def stub_rc_version(version, gh = @gh, sha: HEAD_SHA)
+    gh.stub_show_file(File.basename(@app_dir), sha, IOS_VERSION_REL_PATH,
+                      "\t\t\t\tMARKETING_VERSION = #{version};\n")
   end
 
   def teardown
@@ -354,6 +367,7 @@ class PromoteTest < Minitest::Test
     gh.stub_rev_parse(File.basename(@app_dir), "#{MERGE_SHA}^{tree}", "tree-x")
     gh.stub_rev_parse(File.basename(@app_dir), "#{HEAD_SHA}^{tree}", "tree-x")
     gh.stub_tag_sha("v#{VERSION}", "")
+    stub_rc_version(VERSION, gh)
 
     result = new_promote(gh).prepare(**base_args)
 
@@ -833,6 +847,97 @@ class PromoteTest < Minitest::Test
   IOS_VERSION_REL_PATH = "Convos.xcodeproj/project.pbxproj"
 
   # Plants a minimal pbxproj so the back-merge build's Versions.read/bump
+  # ---- version agreement (prepare) ----
+
+  def test_prepare_fails_before_tag_when_the_rc_version_disagrees
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    # What convos-client shipped as 2.5.0: the branch was advanced to dev
+    # after the post-cut bump landed, so the RC carries the NEXT version.
+    stub_rc_version("2.2.0")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/2\.2\.0/, result.failure)
+    assert_match(/#{Regexp.escape(VERSION)}/, result.failure)
+    # Nothing may be mutated: the tag is the irreversible step.
+    assert_empty @gh.calls_for(:push)
+  end
+
+  # The whole point of reading the blob: a worktree parked at some other
+  # revision (or locally edited) must not be able to vouch for the RC.
+  def test_prepare_reads_the_rc_blob_not_the_worktree
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    plant_pbxproj(@app_dir, VERSION)   # worktree says the right thing...
+    stub_rc_version("2.2.0")           # ...the built RC does not
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/2\.2\.0/, result.failure)
+    show = @gh.calls_for(:show_file)
+    assert_equal 1, show.size
+    assert_equal HEAD_SHA, show.first.args[1]
+    assert_empty @gh.calls_for(:push)
+  end
+
+  def test_prepare_fails_before_tag_when_the_rc_version_file_is_unreadable
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    # nil content -> the fake raises CommandError, as `git show` does for a
+    # path absent at that revision.
+    @gh.stub_show_file(File.basename(@app_dir), HEAD_SHA, IOS_VERSION_REL_PATH, nil)
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/cannot read the promoted version/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
+  def test_prepare_fails_before_tag_when_the_checkout_has_no_version_file
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    FileUtils.rm_rf(File.join(@app_dir, File.dirname(IOS_VERSION_REL_PATH)))
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/no known version file/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
+  def test_prepare_fails_before_tag_when_the_rc_version_is_internally_split
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    @gh.stub_show_file(File.basename(@app_dir), HEAD_SHA, IOS_VERSION_REL_PATH,
+                       "MARKETING_VERSION = 2.0.0;\nMARKETING_VERSION = #{VERSION};\n")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/inconsistent versions/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
+  def test_prepare_accepts_an_rc_whose_version_matches
+    write_manifest_fixture
+    stub_matching_trees
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    stub_rc_version(VERSION)
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Success, result
+  end
+
   # operate on real file content; the fake's checkouts swap it per ref via
   # stub_checkout_content.
   def plant_pbxproj(dir, version)

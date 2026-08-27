@@ -39,6 +39,7 @@ module Train
         yield assert_key_matches_platform(repo: repo, key: key)
 
         yield assert_trees_match(app_dir: app_dir, merge_sha: merge_sha, head_sha: head_sha)
+        yield assert_rc_version(app_dir: app_dir, version: version, head_sha: head_sha)
 
         # Notes staged (and checked) BEFORE the tag push — unedited
         # placeholder notes should stop promotion while nothing has been
@@ -516,6 +517,39 @@ module Train
       return Success(:ok) if merge_tree == head_tree
 
       Failure("merge tree differs from RC'd branch tip — was this a merge commit of the release branch?")
+    end
+
+    # Last gate before the tag: the artifact that was built must claim the
+    # version being promoted. A release branch advanced by merging (or
+    # fast-forwarding to) dev inherits dev's post-cut bump, so its builds
+    # carry the NEXT version while every train artifact still says this one
+    # — convos-client shipped 2.5.0 stamped 2.6.0 that way.
+    #
+    # Read from the BLOB at head_sha, not the worktree: assert_trees_match
+    # compares two git objects and says nothing about what is checked out,
+    # and a manual --app-dir run can be at any revision or locally edited.
+    # head_sha is the RC'd tip the store's artifact was built from, so this
+    # is the version the store actually got. The layout still comes from the
+    # worktree — that is structural (an iOS repo stays an iOS repo), while
+    # the version is content that differs per revision.
+    #
+    # Fails CLOSED on anything unreadable: absent, malformed, or internally
+    # split. "Couldn't tell" must never promote. Placed before ensure_tag so
+    # a mismatch costs nothing.
+    def assert_rc_version(app_dir:, version:, head_sha:)
+      layout, = Versions.layout_for(app_dir)
+      content = @gh.show_file(app_dir, head_sha, Versions::REL_PATHS.fetch(layout))
+      actual = Versions.read_content(layout, content, label: "#{head_sha}:#{Versions::REL_PATHS.fetch(layout)}")
+      return Success(:ok) if actual == version
+
+      Failure("the RC at #{head_sha} is version #{actual}, but #{version} is being promoted — " \
+              "the release branch carries a version file that disagrees with the train " \
+              "(a merge or fast-forward from dev drags the post-cut bump in does this). " \
+              "Reset the version file on the branch, re-merge, and let a fresh RC build.")
+    rescue Versions::Error, Github::CommandError => e
+      Failure("cannot read the promoted version at #{head_sha}: #{e.message}")
+    rescue SystemCallError, IOError => e
+      Failure("cannot read the promoted version from #{app_dir}: #{e.message}")
     end
 
     # Idempotent state check: absent tags get pushed, already-correct is a

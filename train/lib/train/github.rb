@@ -72,6 +72,16 @@ module Train
       out.strip
     end
 
+    # File content at a REVISION, not from the worktree. Promotion validates
+    # the artifact that was actually built, and the worktree is mutable
+    # state a manual --app-dir run can point anywhere; the blob at the RC'd
+    # sha is the thing the store received. CommandError (unknown rev, path
+    # absent at that rev) is the caller's to translate.
+    def show_file(dir, sha, path)
+      out, = run!(%w[git] + ["-C", dir, "show", "#{sha}:#{path}"])
+      out
+    end
+
     # Resolves refs/tags/<tag> on origin to its COMMIT sha ("" if absent).
     # Queries the dereferenced ^{} ref too: an annotated tag's plain line is
     # the tag object's sha, and the peeled ^{} line is the commit it points
