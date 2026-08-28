@@ -76,6 +76,13 @@ class FakeGithub
     @show_files[[dir_suffix, sha, path]] = content
   end
 
+  # Scripts rev_parse to raise for one ref, as real `git rev-parse <sha>^2`
+  # does when the commit has no second parent.
+  def stub_rev_parse_failure(dir_suffix, ref)
+    @rev_parse_failures ||= {}
+    @rev_parse_failures[[dir_suffix, ref]] = true
+  end
+
   def stub_commit_authors(dir_suffix, range, authors)
     @commit_authors ||= {}
     @commit_authors[[dir_suffix, range]] = authors
@@ -193,6 +200,12 @@ class FakeGithub
 
   def rev_parse(dir, ref = "HEAD")
     record(:rev_parse, [dir, ref])
+    if (@rev_parse_failures ||= {})[[suffix(dir), ref]]
+      raise ::Train::Github::CommandError.new(
+        ["git", "-C", dir, "rev-parse", ref],
+        stdout: "", stderr: "fatal: ambiguous argument '#{ref}'", status: nil
+      )
+    end
     @rev_parses ||= {}
     @rev_parses[[suffix(dir), ref]] || @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
   end

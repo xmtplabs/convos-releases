@@ -516,7 +516,68 @@ module Train
       head_tree = @gh.rev_parse(app_dir, "#{head_sha}^{tree}")
       return Success(:ok) if merge_tree == head_tree
 
-      Failure("merge tree differs from RC'd branch tip — was this a merge commit of the release branch?")
+      Failure(tree_mismatch_reason(app_dir: app_dir, merge_sha: merge_sha, head_sha: head_sha))
+    end
+
+    # Trees differ; say WHY when we can tell. The version file is the common
+    # culprit and the one the generic message actively misdirects on:
+    # convos-ios 2.6.0 failed here having been merged with a merge commit,
+    # because main carried a version DOWNGRADE relative to the merge base
+    # (the previous release's "restore MARKETING_VERSION" commits) while the
+    # release branch never touched the line — so the three-way merge silently
+    # took main's older version and the merge tree got stamped 2.5.0.
+    #
+    # Only claims this when the two versions actually differ. Any other cause
+    # (a real squash/rebase, main carrying commits the branch lacks) keeps the
+    # general message, and an unreadable version file falls back to it too —
+    # a confident wrong diagnosis is worse than a vague right one.
+    def tree_mismatch_reason(app_dir:, merge_sha:, head_sha:)
+      general = "merge tree differs from RC'd branch tip — was this a merge commit of the release branch?"
+      merge_version = version_at(app_dir, merge_sha)
+      head_version = version_at(app_dir, head_sha)
+      return general if merge_version.nil? || head_version.nil? || merge_version == head_version
+
+      observed = "the merge commit #{merge_sha} is stamped version #{merge_version}, but the RC'd tip " \
+                 "#{head_sha} is #{head_version} — the merged result carries #{merge_version}. "
+      remedy = "Restore #{head_version} on the merged result, then re-run promotion."
+
+      # Only blame the three-way resolution when there actually WAS one. A
+      # squash or rebase merge can lose the version too, but by a different
+      # route, and telling someone the merge "took the only side that changed"
+      # when there were never two sides is the same misdirection this whole
+      # change exists to remove. The remedy is identical either way.
+      cause =
+        if merge_commit?(app_dir, merge_sha)
+          "This happens when the target branch carries a version change relative to the merge base " \
+            "and the release branch does not touch the line: the three-way merge takes the only side " \
+            "that changed, silently. "
+        else
+          "The merge commit has a single parent — a squash or rebase merge, which did not carry the " \
+            "release branch's version file across. "
+        end
+
+      observed + cause + remedy
+    end
+
+    # True when `sha` has a second parent, i.e. it is a real merge commit.
+    # `git rev-parse <sha>^2` errors when there is none, which is the cheapest
+    # topology probe available through the existing plumbing. Unknowable
+    # (bad sha, unreadable repo) counts as "not a merge" — the caller only
+    # uses this to pick between two explanations, never to gate the failure.
+    def merge_commit?(app_dir, sha)
+      !@gh.rev_parse(app_dir, "#{sha}^2").to_s.strip.empty?
+    rescue Github::CommandError, SystemCallError, IOError
+      false
+    end
+
+    # The marketing version at a revision, or nil if it cannot be read.
+    # Never raises — this runs only to explain a failure that already happened.
+    def version_at(app_dir, sha)
+      layout, = Versions.layout_for(app_dir)
+      content = @gh.show_file(app_dir, sha, Versions::REL_PATHS.fetch(layout))
+      Versions.read_content(layout, content)
+    rescue Versions::Error, Github::CommandError, SystemCallError, IOError
+      nil
     end
 
     # Last gate before the tag: the artifact that was built must claim the

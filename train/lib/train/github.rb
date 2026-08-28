@@ -158,8 +158,20 @@ module Train
     # The token-bearing convos-releases clone URL — one source of truth for
     # readers (Merge/Promote) and StateWriter. GH_TOKEN is read at call time
     # so dry-run/no-token paths that never clone don't require it.
+    # convos-releases is PUBLIC, so a tokenless URL clones fine and only fails
+    # at the push — where StateWriter reads any falsy push as a lost race and
+    # reports "push contention?" after three retries. That misdiagnosis cost
+    # real time during the 2.6.0 promotion (twice: once with GH_TOKEN unset,
+    # once with it set from `gh auth login` instead of `gh auth token`), so
+    # refuse to build a half-credentialed URL at all.
     def releases_clone_url
-      "https://x-access-token:#{ENV["GH_TOKEN"]}@#{RELEASES_URL}"
+      token = ENV["GH_TOKEN"].to_s
+      if token.empty?
+        raise ApiError, "GH_TOKEN is empty — convos-releases would clone but fail to push. " \
+                        "Export a token (GH_TOKEN=$(gh auth token), note `token` not `login`)."
+      end
+
+      "https://x-access-token:#{token}@#{RELEASES_URL}"
     end
 
     # Fresh depth-1 clone of convos-releases into a tmpdir, yielded and always

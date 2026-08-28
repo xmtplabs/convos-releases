@@ -847,6 +847,73 @@ class PromoteTest < Minitest::Test
   IOS_VERSION_REL_PATH = "Convos.xcodeproj/project.pbxproj"
 
   # Plants a minimal pbxproj so the back-merge build's Versions.read/bump
+  # convos-ios 2.6.0: main carried a 2.6.0 -> 2.5.0 change relative to the
+  # merge base (the previous release's "restore MARKETING_VERSION" commits)
+  # while release/2.6.0 never touched the line, so the three-way merge
+  # silently took main's older version. The generic tree message blamed
+  # squash/rebase merges; the failure must name the versions instead.
+  def test_prepare_names_the_versions_when_the_merge_lost_the_release_version
+    write_manifest_fixture
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{MERGE_SHA}^{tree}", "tree-merge")
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{HEAD_SHA}^{tree}", "tree-head")
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    stub_rc_version(VERSION)
+    # The merge commit is stamped with the PREVIOUS version.
+    @gh.stub_show_file(File.basename(@app_dir), MERGE_SHA, IOS_VERSION_REL_PATH,
+                       "\t\t\t\tMARKETING_VERSION = 2.0.9;\n")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/2\.0\.9/, result.failure)
+    assert_match(/#{Regexp.escape(VERSION)}/, result.failure)
+    assert_match(/three-way/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
+  # A squash/rebase merge can ALSO land a different version, but not by the
+  # three-way mechanism — so it must not be told to "restore on the merged
+  # result because the merge took the only side that changed". The remedy is
+  # the same; the causal claim is what would be wrong.
+  def test_prepare_does_not_blame_a_three_way_merge_when_the_merge_has_one_parent
+    write_manifest_fixture
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{MERGE_SHA}^{tree}", "tree-merge")
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{HEAD_SHA}^{tree}", "tree-head")
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    stub_rc_version(VERSION)
+    @gh.stub_show_file(File.basename(@app_dir), MERGE_SHA, IOS_VERSION_REL_PATH,
+                       "\t\t\t\tMARKETING_VERSION = 2.0.9;\n")
+    # No second parent: squash or rebase, not a merge commit.
+    @gh.stub_rev_parse_failure(File.basename(@app_dir), "#{MERGE_SHA}^2")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/2\.0\.9/, result.failure)
+    assert_match(/squash|rebase/i, result.failure)
+    refute_match(/three-way/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
+  # Trees differing for some OTHER reason (a real squash/rebase merge, or
+  # main carrying commits the release branch lacks) must keep the general
+  # message — the version-specific one would be a confident wrong answer.
+  def test_prepare_keeps_the_general_message_when_versions_agree
+    write_manifest_fixture
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{MERGE_SHA}^{tree}", "tree-merge")
+    @gh.stub_rev_parse(File.basename(@app_dir), "#{HEAD_SHA}^{tree}", "tree-head")
+    @gh.stub_tag_sha("v#{VERSION}", "")
+    stub_rc_version(VERSION)
+    @gh.stub_show_file(File.basename(@app_dir), MERGE_SHA, IOS_VERSION_REL_PATH,
+                       "\t\t\t\tMARKETING_VERSION = #{VERSION};\n")
+
+    result = new_promote.prepare(**base_args)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(/merge tree differs/, result.failure)
+    assert_empty @gh.calls_for(:push)
+  end
+
   # ---- version agreement (prepare) ----
 
   def test_prepare_fails_before_tag_when_the_rc_version_disagrees
