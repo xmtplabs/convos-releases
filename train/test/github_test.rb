@@ -817,6 +817,102 @@ class GithubTest < Minitest::Test
     FileUtils.remove_entry(dir) if dir
   end
 
+  # ---- merge_base / merge_no_commit / merge_abort: the cut's tip build ----
+
+  # A two-branch fixture on real git: `base` -> (dev: "dev") / (side: "side").
+  def two_branch_repo(conflicting: false)
+    dir = Dir.mktmpdir("gh-merge-")
+    system("git", "-C", dir, "init", "--quiet", "--initial-branch=dev", exception: true)
+    system("git", "-C", dir, "config", "user.email", "base@example.com", exception: true)
+    system("git", "-C", dir, "config", "user.name", "Base", exception: true)
+    File.write(File.join(dir, "shared"), "base\n")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "base", exception: true)
+
+    system("git", "-C", dir, "checkout", "--quiet", "-b", "side", exception: true)
+    File.write(File.join(dir, conflicting ? "shared" : "side-only"), "side\n")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "side", exception: true)
+
+    system("git", "-C", dir, "checkout", "--quiet", "dev", exception: true)
+    File.write(File.join(dir, conflicting ? "shared" : "dev-only"), "dev\n")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "--quiet", "-m", "dev", exception: true)
+    dir
+  end
+
+  def test_merge_base_returns_the_common_ancestor
+    dir = two_branch_repo
+    gh = Train::Github.new
+    base = `git -C #{dir} rev-parse dev~1`.strip
+
+    assert_equal base, gh.merge_base(dir, "dev", "side")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  # --no-commit is the whole point: the cut amends the merged tree (it
+  # re-asserts the version file) and commits ONCE, so the branch creation
+  # still triggers exactly one RC upload.
+  def test_merge_no_commit_stages_the_merge_without_committing_it
+    dir = two_branch_repo
+    gh = Train::Github.new
+    head_before = `git -C #{dir} rev-parse HEAD`.strip
+
+    assert_equal true, gh.merge_no_commit(dir, "side")
+    assert_equal head_before, `git -C #{dir} rev-parse HEAD`.strip, "the merge must not commit itself"
+    assert_path_exists File.join(dir, "side-only"), "side's content should be merged into the worktree"
+    assert_path_exists File.join(dir, ".git", "MERGE_HEAD"), "a merge should be in progress"
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  # An up-to-date merge is success, not a conflict — the caller's tip is then
+  # simply the sha it started from.
+  def test_merge_no_commit_is_success_when_already_up_to_date
+    dir = two_branch_repo
+    gh = Train::Github.new
+
+    assert_equal true, gh.merge_no_commit(dir, "dev~1")
+    refute_path_exists File.join(dir, ".git", "MERGE_HEAD")
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  def test_merge_no_commit_reports_conflicts_and_merge_abort_unwinds_them
+    dir = two_branch_repo(conflicting: true)
+    gh = Train::Github.new
+
+    assert_equal false, gh.merge_no_commit(dir, "side")
+    assert_path_exists File.join(dir, ".git", "MERGE_HEAD")
+
+    gh.merge_abort(dir)
+    refute_path_exists File.join(dir, ".git", "MERGE_HEAD"), "abort must leave the checkout usable"
+    assert_equal "dev\n", File.read(File.join(dir, "shared"))
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
+  # The back-merge gate excludes a second negative revision so main's own
+  # history — which the release branch now contains by construction — cannot
+  # pose as release work owed back to dev.
+  def test_commit_authors_excludes_a_negative_revision
+    dir = two_branch_repo
+    gh = Train::Github.new
+    root = `git -C #{dir} rev-list --max-parents=0 HEAD`.strip
+    system("git", "-C", dir, "config", "user.email", "human@example.com", exception: true)
+    system("git", "-C", dir, "merge", "--quiet", "--no-ff", "-m", "merge side", "side", exception: true)
+
+    # Unfiltered the range is dev's commit, side's commit and the merge;
+    # excluding ^side drops everything side already carried.
+    assert_equal %w[base@example.com base@example.com human@example.com],
+                 gh.commit_authors(dir, "#{root}..HEAD").sort
+    assert_equal %w[base@example.com human@example.com],
+                 gh.commit_authors(dir, "#{root}..HEAD", exclude: "side").sort
+  ensure
+    FileUtils.remove_entry(dir) if dir
+  end
+
   def test_remote_url_returns_origin_url
     dir = Dir.mktmpdir("gh-remote-")
     system("git", "-C", dir, "init", "--quiet", exception: true)

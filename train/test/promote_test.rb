@@ -725,6 +725,74 @@ class PromoteTest < Minitest::Test
            "bot-only divergence must not trigger a back-merge PR")
   end
 
+  # ---- back-merge gate vs. main's own history on the release branch ----
+
+  # Since the cut builds release/x.y.z as a merge of dev AND main, `dev..tip`
+  # sweeps in every main commit dev never absorbed — mostly earlier releases'
+  # merge commits, authored by whoever pressed merge rather than by this
+  # tool's bot identity. Unfiltered, that opens a back-merge PR on every
+  # single release. The gate excludes everything that was already on main
+  # BEFORE this release merged, recovered from the first parent of the
+  # v<version> merge commit `prepare` has just tagged.
+  def stub_release_merge_tag(merge_sha: "release-merge-sha", main_before: "main-before-sha")
+    app = File.basename(@app_dir)
+    @gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "releasesha")
+    @gh.stub_tag_sha("v#{VERSION}", merge_sha)
+    @gh.stub_rev_parse(app, "#{merge_sha}^1", main_before)
+  end
+
+  def test_record_on_release_ignores_commits_that_were_already_on_main
+    stub_releases_clone(kind: "release")
+    stub_release_merge_tag
+    app = File.basename(@app_dir)
+    # Unexcluded the range is full of main's old, human-authored merges...
+    @gh.stub_commit_authors(app, "devsha..releasesha", ["human@example.com"])
+    # ...excluded, only the cut's own bot-authored merge commit remains.
+    @gh.stub_commit_authors(app, "devsha..releasesha", [Train::Github::BOT_AUTHOR_EMAIL],
+                            exclude: "main-before-sha")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute(@gh.calls_for(:pr_create).any? { |c| c.kwargs[:base] == "dev" },
+           "main's own history must not be mistaken for release work owed back to dev")
+    assert_equal "main-before-sha", @gh.calls_for(:commit_authors).last.kwargs[:exclude]
+  end
+
+  def test_record_on_release_still_back_merges_work_only_the_release_branch_has
+    stub_releases_clone(kind: "release")
+    stub_release_merge_tag
+    # A human commit that is NOT on main-before is real release work — the
+    # exclusion must narrow the range, not disarm the gate.
+    @gh.stub_commit_authors(File.basename(@app_dir), "devsha..releasesha", ["human@example.com"],
+                            exclude: "main-before-sha")
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" },
+               "release-only work must still open a back-merge PR")
+  end
+
+  # No tag to read (a manual `record` with no `prepare`, or a version tagged
+  # before this existed): run the gate unexcluded. That over-triggers — a
+  # spurious back-merge PR is noise a human closes, while a MISSED back-merge
+  # is the divergence this gate exists to prevent.
+  def test_record_on_release_without_a_release_tag_runs_the_gate_unexcluded
+    stub_releases_clone(kind: "release")
+    app = File.basename(@app_dir)
+    @gh.stub_ls_remote(app, "refs/heads/dev", "devsha")
+    @gh.stub_ls_remote(app, "refs/heads/release/#{VERSION}", "releasesha")
+    @gh.stub_commit_authors(app, "devsha..releasesha", ["human@example.com"])
+
+    result = new_promote.record(**record_args)
+
+    assert_equal Dry::Monads::Success(true), result
+    assert_nil @gh.calls_for(:commit_authors).last.kwargs[:exclude]
+    refute_nil(@gh.calls_for(:pr_create).find { |c| c.kwargs[:head] == "backmerge/#{VERSION}" })
+  end
+
   def test_record_release_back_merge_check_git_failure_is_a_hard_failure
     stub_releases_clone(kind: "release")
     app = File.basename(@app_dir)

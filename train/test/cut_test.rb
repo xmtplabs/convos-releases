@@ -36,19 +36,45 @@ class CutTest < Minitest::Test
     @gh.stub_clone("convos-client") do |dest|
       write_android_fixture(dest, client_version)
     end
+    stub_no_version_drift(@gh, ios_version: ios_version, client_version: client_version)
+  end
+
+  # The real repo-relative paths, not copies — a layout change must break
+  # these stubs rather than let them keep answering for a file that moved.
+  IOS_PATH = Train::Versions::REL_PATHS.fetch(:ios)
+  ANDROID_PATH = Train::Versions::REL_PATHS.fetch(:android)
+
+  def ios_blob(version)
+    "MARKETING_VERSION = #{version};\nMARKETING_VERSION = #{version};\n"
+  end
+
+  def android_blob(version)
+    "VERSION_NAME=#{version}\n"
+  end
+
+  # The cut's drift canary reads the version file at merge-base(main, dev) and
+  # at main. Default both to the version dev carries, so only the tests that
+  # opt into the 2.6.0 shape (main behind the merge base) see a warning —
+  # otherwise every unrelated cut test would carry the canary's noise.
+  def stub_no_version_drift(gh, ios_version:, client_version:)
+    gh.stub_merge_base("convos-ios", "base-ios")
+    gh.stub_merge_base("convos-client", "base-client")
+    gh.stub_show_file("convos-ios", "base-ios", IOS_PATH, ios_blob(ios_version))
+    gh.stub_show_file("convos-ios", "origin/main", IOS_PATH, ios_blob(ios_version))
+    gh.stub_show_file("convos-client", "base-client", ANDROID_PATH, android_blob(client_version))
+    gh.stub_show_file("convos-client", "origin/main", ANDROID_PATH, android_blob(client_version))
   end
 
   def write_android_fixture(dest, version)
-    FileUtils.mkdir_p(File.join(dest, "android"))
-    File.write(File.join(dest, "android", "gradle.properties"), "VERSION_NAME=#{version}\n")
+    path = File.join(dest, ANDROID_PATH)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, android_blob(version))
   end
 
   def write_ios_fixture(dest, version)
-    FileUtils.mkdir_p(File.join(dest, "Convos.xcodeproj"))
-    File.write(
-      File.join(dest, "Convos.xcodeproj", "project.pbxproj"),
-      "MARKETING_VERSION = #{version};\nMARKETING_VERSION = #{version};\n"
-    )
+    path = File.join(dest, IOS_PATH)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, ios_blob(version))
   end
 
   def new_cut(gh = @gh, notifier: nil, ai_notes: nil)
@@ -168,6 +194,7 @@ class CutTest < Minitest::Test
   def stub_clones_on(gh, version:)
     gh.stub_clone("convos-ios") { |dest| write_ios_fixture(dest, version) }
     gh.stub_clone("convos-client") { |dest| write_android_fixture(dest, version) }
+    stub_no_version_drift(gh, ios_version: version, client_version: version)
   end
 
   def test_version_disagreement_aborts_before_any_mutation
@@ -523,8 +550,13 @@ class CutTest < Minitest::Test
     assert_equal "branched", data["status"], "top-level status must advance once all repos succeed"
   end
 
-  def test_release_branch_mismatch_fails_loud
+  # A release/x.y.z that does NOT contain dev's cut sha is a branch that
+  # predates the cut (the stale-manual-release-branch case the old
+  # sha-equality check caught). Equality itself can no longer be the test:
+  # the tip is a merge commit whose sha this run would not reproduce.
+  def test_release_branch_that_predates_the_cut_fails_loud
     @gh.stub_ls_remote("convos-ios", "refs/heads/release/2.1.0", "some-other-sha")
+    @gh.stub_not_ancestor("convos-ios")
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
@@ -534,7 +566,13 @@ class CutTest < Minitest::Test
     result = cut.run(force: true, date_override: EDT_THU)
 
     assert_instance_of Dry::Monads::Result::Failure, result
-    assert_match(/exists at .* expected/i, result.failure)
+    assert_match(/exists at some-other-sha, which does not contain/i, result.failure)
+    assert_match(/stale manual release branch/i, result.failure)
+    # Nothing may be force-moved onto a branch we do not recognize (the
+    # sibling repo's own release branch is pushed normally).
+    refute(@gh.calls_for(:push).any? do |c|
+      File.basename(c.args[0]) == "convos-ios" && c.args[1].to_s.end_with?("refs/heads/release/2.1.0")
+    end, "a foreign release branch must not be pushed over")
   end
 
   def test_bump_pr_failure_on_one_repo_does_not_abort_the_other_repo
@@ -581,6 +619,7 @@ class CutTest < Minitest::Test
     # created and its manifest status advances to "branched" — even though
     # the overall Result is a Failure naming convos-ios.
     @gh.stub_ls_remote("convos-ios", "refs/heads/release/2.1.0", "some-other-sha")
+    @gh.stub_not_ancestor("convos-ios")
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
     @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
@@ -704,5 +743,167 @@ class CutTest < Minitest::Test
 
     assert_equal Dry::Monads::Success(:cut), result
     assert_equal [{ version: "2.1.0", slack: { channel: "C0APP", ts: "1700000000.000100" } }], ai.requests
+  end
+  # ---- release/x.y.z is cut as a merge of dev AND main (the 2.6.0 incident) ----
+
+  def stub_prs_for_a_full_cut
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    @gh.set_dirty(true)
+  end
+
+  # The branch tip must be a MERGE of dev's cut sha and main's tip, not dev's
+  # sha itself: only a release branch that CONTAINS main moves the later
+  # release->main merge base to main's own tip, which is what stops a
+  # three-way merge from resolving the version line to main's older value.
+  def test_release_branch_is_cut_as_a_merge_of_dev_and_main
+    @gh.stub_rev_parse_sequence("convos-ios", "HEAD", %w[dev-tip-ios merge-tip-ios])
+    @gh.stub_rev_parse("convos-ios", "origin/main", "main-tip-ios")
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    merge = @gh.calls_for(:merge_no_commit).find { |c| File.basename(c.args[0]) == "convos-ios" }
+    refute_nil merge, "the cut must merge main into the release tip"
+    assert_equal "main-tip-ios", merge.args[1]
+    # detached at DEV's cut sha before merging main in — first parent is dev.
+    checkouts = @gh.calls_for(:checkout).select { |c| File.basename(c.args[0]) == "convos-ios" }.map { |c| c.args[1] }
+    assert_includes checkouts, "dev-tip-ios"
+
+    branch_pushes = @gh.calls_for(:push).select { |c| c.args[1].to_s.end_with?("refs/heads/release/2.1.0") }
+    ios_push = branch_pushes.find { |c| File.basename(c.args[0]) == "convos-ios" }
+    assert_equal "merge-tip-ios:refs/heads/release/2.1.0", ios_push.args[1]
+    # ONE push creates the branch, so the branch creation still triggers
+    # exactly one RC upload, as before.
+    assert_equal 1, branch_pushes.count { |c| File.basename(c.args[0]) == "convos-ios" }
+
+    # The recorded source-sha stays DEV's tip: reconcile and the bump PR both
+    # branch from it, and it is not the (merge) branch tip any more.
+    data = Train::Manifest.read(File.join(@releases_dir, "releases", "2.1.0", "manifest.yml"))
+    assert_equal "dev-tip-ios", data["repos"]["xmtplabs/convos-ios"]["source-sha"]
+  end
+
+  # Merging main in drags main's OLDER version file onto the branch (that is
+  # the whole point of the merge base moving), so the cut has to re-assert the
+  # release version in the same commit — otherwise the branch would build RCs
+  # stamped with the previous release.
+  def test_release_branch_merge_reasserts_the_cut_version_in_the_same_commit
+    @gh.stub_merge_content("convos-ios") { |dest| write_ios_fixture(dest, "2.0.0") }
+    committed = {}
+    @gh.on_commit do |dir, message|
+      committed[message] = Train::Versions.read(dir) if File.basename(dir) == "convos-ios"
+    end
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    cut_commit = committed.keys.find { |m| m.include?("cut release/2.1.0") }
+    refute_nil cut_commit, "expected a release-tip commit in the ios clone, got: #{committed.keys}"
+    assert_equal "2.1.0", committed[cut_commit],
+                 "main's older version file rode in on the merge and was never re-asserted"
+    # The bot authored it, so Promote's back-merge gate keeps ignoring it.
+    configured = @gh.calls_for(:git_config_bot).map { |c| File.basename(c.args.first) }
+    assert_includes configured, "convos-ios"
+  end
+
+  # guard_ancestry probes exactly this merge before anything is claimed, so a
+  # conflict here means main moved underneath us. Fail that repo loudly, leave
+  # no half-merged checkout behind, and push nothing.
+  def test_release_branch_merge_conflict_fails_that_repo_and_aborts_the_merge
+    @gh.fail_merge_no_commit("convos-ios")
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_instance_of Dry::Monads::Result::Failure, result
+    assert_match(%r{xmtplabs/convos-ios: merging main .* conflicted}i, result.failure)
+    assert(@gh.calls_for(:merge_abort).any? { |c| File.basename(c.args.first) == "convos-ios" },
+           "a conflicted merge must be aborted, not left in the checkout")
+    refute(@gh.calls_for(:push).any? do |c|
+      File.basename(c.args[0]) == "convos-ios" && c.args[1].to_s.end_with?("refs/heads/release/2.1.0")
+    end, "nothing may be pushed when the release tip could not be built")
+
+    data = Train::Manifest.read(File.join(@releases_dir, "releases", "2.1.0", "manifest.yml"))
+    assert_equal "pending", data["repos"]["xmtplabs/convos-ios"]["status"]
+    assert_equal "branched", data["repos"]["xmtplabs/convos-client"]["status"]
+  end
+
+  # Re-dispatching a cut must converge. The branch tip is a merge commit this
+  # run would rebuild with a different sha, so "existing == source-sha" is no
+  # longer the question — "does the branch contain dev's cut sha" is.
+  def test_existing_release_branch_containing_devs_cut_sha_converges
+    @gh.stub_ls_remote("convos-ios", "refs/heads/release/2.1.0", "existing-merge-tip")
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/release\/2\.1\.0 already exists at existing-merge-tip/, @out.string)
+    # The tip is fetched before git is asked about it: an earlier run pushed it
+    # from a different clone, so this one may not have the object yet.
+    assert(@gh.calls_for(:fetch).any? { |c| c.args[1] == "existing-merge-tip" })
+    refute(@gh.calls_for(:merge_no_commit).any? { |c| File.basename(c.args[0]) == "convos-ios" },
+           "an existing release branch must not be rebuilt")
+    refute(@gh.calls_for(:push).any? do |c|
+      File.basename(c.args[0]) == "convos-ios" && c.args[1].to_s.end_with?("refs/heads/release/2.1.0")
+    end, "converging must not re-push the branch")
+
+    data = Train::Manifest.read(File.join(@releases_dir, "releases", "2.1.0", "manifest.yml"))
+    assert_equal "branched", data["repos"]["xmtplabs/convos-ios"]["status"]
+  end
+
+  # ---- cut-time version-drift canary ----
+
+  # merge-base(main, dev) reading a different version than main IS the 2.6.0
+  # arming condition: main is then the only side that changed the version
+  # line, so any merge based there resolves to main's version. Warn very
+  # loudly (the merge-of-main above is what actually defuses it).
+  def test_cut_warns_when_the_merge_base_version_differs_from_main
+    # main restored 2.0.0 after its own release; the merge base is a dev
+    # commit already carrying 2.1.0 — exactly the 2026-08-28 graph.
+    @gh.stub_show_file("convos-ios", "origin/main", IOS_PATH, ios_blob("2.0.0"))
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result, "the canary warns; it must not fail the weekly cut"
+    assert_match(/xmtplabs\/convos-ios: version drift/i, @err.string)
+    assert_match(/base-ios reads 2\.1\.0/, @err.string)
+    assert_match(/main reads 2\.0\.0/, @err.string)
+    refute_match(/convos-client: version drift/i, @err.string)
+  end
+
+  def test_cut_does_not_warn_when_the_merge_base_matches_main
+    stub_prs_for_a_full_cut
+
+    result = new_cut.run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    refute_match(/version drift/i, @err.string)
+  end
+
+  # An unreadable blob (no such rev, a layout the canary can't parse) must
+  # degrade to a warning about the canary itself — never take down a cut over
+  # a diagnostic.
+  def test_cut_version_drift_canary_failure_is_only_a_warning
+    gh = FakeGithub.new
+    gh.stub_clone("convos-ios") { |dest| write_ios_fixture(dest, "2.1.0") }
+    gh.stub_clone("convos-client") { |dest| write_android_fixture(dest, "2.1.0") }
+    # No show_file stubs at all: the fake raises CommandError, as `git show`
+    # does for an unknown rev.
+    gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "bot/bump-2.2.0", base: nil, state: "all", result: [])
+    gh.stub_pr_list(repo: "xmtplabs/convos-ios", head: "release/2.1.0", base: "main", state: "open", result: [])
+    gh.stub_pr_list(repo: "xmtplabs/convos-client", head: "release/2.1.0", base: "main", state: "open", result: [])
+    gh.set_dirty(true)
+
+    result = new_cut(gh).run(force: true, date_override: EDT_THU)
+
+    assert_equal Dry::Monads::Success(:cut), result
+    assert_match(/could not evaluate the merge-base version drift/i, @err.string)
   end
 end

@@ -114,6 +114,17 @@ module Train
       raise CommandError.new(args, stdout: stdout, stderr: stderr, status: status)
     end
 
+    # The best common ancestor of two revisions — the commit a three-way merge
+    # compares BOTH sides against. Read-only. The cut's version-drift canary
+    # needs it named explicitly: it is the merge base, not either tip, that
+    # decides which side "changed" a line, and that is the whole of the 2.6.0
+    # incident (a base already carrying the new version made MAIN the only
+    # side that had changed it, so the merge took main's older value).
+    def merge_base(dir, ours, theirs)
+      out, = run!(["git", "-C", dir, "merge-base", ours, theirs])
+      out.strip
+    end
+
     # Whether merging `ours` and `theirs` would conflict (merge-tree
     # --write-tree, no worktree). Exit 1 counts as a conflict verdict only
     # when a tree was written; refusals like a bad ref (also exit 1) raise.
@@ -132,8 +143,18 @@ module Train
     # field, so a sole empty-`%ae` commit ("\n") would collapse to [] and vanish;
     # lines keeps it as [""]. An empty/malformed author must survive so it counts
     # as a distinct (non-bot) author and forces a back-merge. Do NOT reject-empty.
-    def commit_authors(dir, range)
-      out, = run!(["git", "-C", dir, "log", "--format=%ae", range])
+    #
+    # `exclude` adds a second negative revision ("^<sha>"), i.e. "reachable
+    # from the range's tip, but from NEITHER its base NOR <sha>". The release
+    # back-merge gate needs it now that release branches contain main by
+    # construction: main's own history would otherwise pose as release work
+    # owed back to dev. Deliberately a plain negative rev and NOT
+    # --first-parent — that flag's interaction with the negative side of a
+    # range is subtle, and this gate must not rest on a subtlety.
+    def commit_authors(dir, range, exclude: nil)
+      args = ["git", "-C", dir, "log", "--format=%ae", range]
+      args << "^#{exclude}" unless exclude.to_s.empty?
+      out, = run!(args)
       out.lines(chomp: true)
     end
 
@@ -301,6 +322,40 @@ module Train
     # sha ls_remote reports may not exist in this clone yet.
     def fetch(dir, refspec)
       run!(["git", "-C", dir, "fetch", "origin", refspec])
+    end
+
+    # `git merge --no-ff --no-commit <ref>` into `dir`'s current (detached)
+    # checkout: applies the merge and leaves it STAGED so the caller can amend
+    # the merged tree before committing it — the cut re-asserts the version
+    # file, then commits once, so creating a release branch still fires
+    # exactly one RC upload. --no-ff matters even here: without it a merge
+    # that could fast-forward would move the checkout onto `ref` outright,
+    # silently discarding the side we detached at.
+    #
+    # Local to `dir` and pushes nothing, so like checkout_branch/reset_hard/
+    # fetch it runs unconditionally rather than through mutate!.
+    #
+    # true = merged (including "Already up to date.", which leaves nothing
+    # staged and no MERGE_HEAD); false = conflicts, leaving `dir` mid-merge
+    # for the caller to merge_abort. Exit > 1 is an operational git failure
+    # and raises rather than posing as a conflict verdict — the same split
+    # merge_conflicts? makes.
+    def merge_no_commit(dir, ref)
+      args = ["git", "-C", dir, "merge", "--quiet", "--no-ff", "--no-commit", ref]
+      stdout, stderr, status = run(args)
+      return true if status.success?
+      return false if status.exitstatus == 1
+
+      raise CommandError.new(args, stdout: stdout, stderr: stderr, status: status)
+    end
+
+    # `git merge --abort` — unwinds a conflicted merge_no_commit so the
+    # checkout is usable again. Best-effort on purpose: the clone is a
+    # throwaway tmpdir, so there is nothing left to recover if the abort
+    # itself fails, and raising here would mask the conflict that sent us.
+    def merge_abort(dir)
+      run(["git", "-C", dir, "merge", "--abort"])
+      nil
     end
 
     # ---- mutating operations: no-op (but logged) under dry-run ----
