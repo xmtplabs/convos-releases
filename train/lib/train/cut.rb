@@ -53,6 +53,7 @@ module Train
 
         nxt = Versions.next_minor(version)
         @out.puts "Cutting release/#{version}; dev moves to #{nxt}"
+        warn_on_version_drift(work: work, version: version)
 
         sha = captures.transform_values { |c| c[:sha] }
 
@@ -198,9 +199,56 @@ module Train
       Success(in_flight || version)
     end
 
+    # Cut-time canary for the graph shape that produced the 2.6.0 incident: a
+    # merge-base(main, dev) that already reads a DIFFERENT version than main
+    # means main is the side that "changed" the version line, so any three-way
+    # merge based there resolves to MAIN's version, silently.
+    #
+    # Warn, don't fail. ensure_release_branch now makes release/X contain
+    # main's tip, which moves the release->main merge's base to main's own tip
+    # and takes this condition out of that decision entirely — so it is a
+    # diagnostic, not a verdict, and failing the weekly cut on a signal the
+    # cut itself has already defused would trade a silent bug for a loud
+    # outage. The gates that actually protect the store artifact
+    # (Promote#assert_trees_match, Promote#assert_rc_version) stay hard, and
+    # they are what caught 2.6.0 with nothing yet mutated.
+    #
+    # Per repo, and never fatal: an unreadable blob degrades to a warning
+    # about the canary itself rather than taking down a cut over a diagnostic.
+    def warn_on_version_drift(work:, version:)
+      REPOS.each do |repo|
+        dir = File.join(work, repo.split("/").last)
+        base = @gh.merge_base(dir, "origin/main", "origin/dev")
+        layout, = Versions.layout_for(dir)
+        path = Versions::REL_PATHS.fetch(layout)
+        base_version = version_at(dir: dir, rev: base, layout: layout, path: path)
+        main_version = version_at(dir: dir, rev: "origin/main", layout: layout, path: path)
+        next if base_version == main_version
+
+        loud_warning(
+          "#{repo}: version drift — merge-base(main, dev) #{base} reads #{base_version} but main reads " \
+          "#{main_version}. That is the 2.6.0 shape: in any three-way merge based on #{base}, main is the " \
+          "only side that changed the version line, so the merge takes #{main_version}. release/#{version} " \
+          "is cut as a merge of dev AND main, whose base is main's own tip, which neutralizes it — but if " \
+          "the release PR's merge commit reads anything other than #{version}, STOP before tagging."
+        )
+      rescue Github::CommandError, Versions::Error => e
+        loud_warning("#{repo}: could not evaluate the merge-base version drift canary: #{e.message}")
+      end
+    end
+
+    # The version in the blob at `rev`, not in the worktree — the canary is
+    # about what two COMMITS say, which is what a merge compares.
+    def version_at(dir:, rev:, layout:, path:)
+      Versions.read_content(layout, @gh.show_file(dir, rev, path), label: "#{rev}:#{path}")
+    end
+
     def print_dry_run_plan(version, sha, nxt)
       @out.puts "DRY RUN — plan:"
-      REPOS.each { |repo| @out.puts "  #{repo}: branch release/#{version} @ #{sha[repo]}; bump PR -> #{nxt}; release PR -> main" }
+      REPOS.each do |repo|
+        @out.puts "  #{repo}: branch release/#{version} = merge(dev #{sha[repo]}, main) @ version #{version}; " \
+                  "bump PR -> #{nxt}; release PR -> main"
+      end
       @out.puts "  convos-releases: releases/#{version}/{manifest.yml,ios.md,android.md,submission-notes.md}"
     end
 
@@ -295,19 +343,119 @@ module Train
       Success(:ok)
     end
 
+    # release/X is cut as a MERGE of dev's tip AND main's tip, with the version
+    # file re-asserted to X in that same commit.
+    #
+    # Why (the 2026-08-28 2.6.0 incident): git merges compare CONTENT against
+    # the merge base, not commits. merge-base(main, release/2.6.0) was a DEV
+    # commit that already read 2.6.0; main had since changed that line to
+    # 2.5.0 (the 2.5.0 release's restore commits, which reached main through
+    # that release's merge); release/2.6.0 never touched it, so it was
+    # UNCHANGED relative to the base. A three-way merge takes the side that
+    # changed — so the release PR's merge commit came out stamped 2.5.0 while
+    # the RC'd tip and the uploaded TestFlight build said 2.6.0. No conflict,
+    # no signal. Promote#assert_trees_match caught it before anything was
+    # tagged, but the release had to be repaired by hand. The arming condition
+    # is exactly version_at(merge-base(main, dev)) != version_at(main), which
+    # recurs every time a release branch merges dev in after the post-cut bump
+    # and then restores its own version — i.e. every time the discipline is
+    # followed correctly.
+    #
+    # Making release/X contain main's tip resets that base permanently: the
+    # base of the later release->main merge becomes main's own tip, so main is
+    # UNCHANGED and release/X (version X) is the only side that changed. The
+    # merge can only resolve to X — and, main being an ancestor, its tree is
+    # exactly the RC'd tip's tree, which is the invariant assert_trees_match
+    # exists to check. Self-sustaining, too: later dev merges into release/X
+    # only move the base along dev's line, and the next cut merges main in
+    # again. See test/release_branch_merge_test.rb for the property on real git.
+    #
+    # NOT an explicit version commit on release/X at cut time — that idea has
+    # been ruled out twice: at cut the release version already equals dev's,
+    # so the commit is empty, and an empty commit changes no content for a
+    # three-way merge to see.
     def ensure_release_branch(dir:, repo:, version:, sha:)
       existing = @gh.ls_remote(dir, "refs/heads/release/#{version}")
-      if existing.empty?
-        unless @gh.push(dir, "#{sha}:refs/heads/release/#{version}")
-          return Failure("#{repo}: failed to push release/#{version}")
-        end
-        @out.puts "#{repo}: created release/#{version} @ #{sha}"
-      elsif existing != sha
-        return Failure("#{repo} release/#{version} exists at #{existing}, expected #{sha}")
-      else
-        @out.puts "#{repo}: release/#{version} already correct"
+      unless existing.empty?
+        return converge_release_branch(dir: dir, repo: repo, version: version, sha: sha, existing: existing)
       end
+
+      tip = yield build_release_tip(dir: dir, repo: repo, version: version, sha: sha)
+      unless @gh.push(dir, "#{tip}:refs/heads/release/#{version}")
+        return Failure("#{repo}: failed to push release/#{version}")
+      end
+
+      @out.puts "#{repo}: created release/#{version} @ #{tip} (dev #{sha} merged with main)"
       Success(:ok)
+    end
+
+    # Builds the release tip locally and returns its sha: detach at dev's cut
+    # sha (so dev is the FIRST parent), merge main, re-assert the version,
+    # commit. ONE commit, and the caller makes ONE push — creating the branch
+    # still triggers exactly one RC upload, as it always did.
+    def build_release_tip(dir:, repo:, version:, sha:)
+      main_sha = @gh.rev_parse(dir, "origin/main")
+      @gh.checkout(dir, sha)
+
+      unless @gh.merge_no_commit(dir, main_sha)
+        @gh.merge_abort(dir)
+        return Failure("#{repo}: merging main (#{main_sha}) into dev (#{sha}) for release/#{version} conflicted — " \
+                       "guard_ancestry probes exactly this merge before the cut claims anything, so a conflict " \
+                       "here means main moved underneath it; true-merge main into dev, then re-dispatch the cut")
+      end
+
+      # dev already reads `version`, but main's side of the merge carries the
+      # PREVIOUS one, and whichever side changed the line wins — so assert it
+      # rather than assume. A no-op write when the merge left X in place.
+      Versions.bump(dir, version)
+      @gh.git_config_bot(dir)
+      # `all: true` sweeps up both the staged merge and the version rewrite, so
+      # the merge commit IS the version-asserting commit — and it is authored
+      # by the bot, which keeps Promote's back-merge gate ignoring it. A false
+      # return ("nothing to commit") means main was already merged AND the
+      # version already read X; the tip is then just `sha`, still correct.
+      @gh.commit(dir, "train: cut release/#{version} (merge main; version #{version})", all: true)
+
+      Success(@gh.rev_parse(dir))
+    rescue Versions::Error => e
+      @gh.merge_abort(dir)
+      Failure("#{repo}: could not re-assert version #{version} on the release/#{version} tip: #{e.message}")
+    rescue Github::CommandError => e
+      @gh.merge_abort(dir)
+      Failure("#{repo}: could not build the release/#{version} tip: #{e.message}")
+    end
+
+    # An existing release/X is CONVERGED, not compared for equality. The tip is
+    # a merge commit now, and this run would rebuild it with a different sha
+    # (merge commits carry timestamps), so `existing != sha` is no longer
+    # evidence of anything — while re-dispatching a cut still has to converge,
+    # since the whole cut path is ensure-state.
+    #
+    # What the equality check was really protecting is kept: a branch that does
+    # NOT contain dev's cut sha predates the cut (a stale manual release/X),
+    # and is refused rather than pushed over. Our own tip contains it (it
+    # merges it), and so does a branch that has since advanced with RC fixes or
+    # a dev merge — which is exactly the set that should converge.
+    def converge_release_branch(dir:, repo:, version:, sha:, existing:)
+      if existing == sha
+        @out.puts "#{repo}: release/#{version} already correct"
+        return Success(:ok)
+      end
+
+      # An earlier run pushed that tip from a DIFFERENT clone, so this one may
+      # not hold the object yet — fetch before asking git about ancestry (the
+      # same reason Promote fetches before commit_authors).
+      @gh.fetch(dir, existing)
+      if @gh.ancestor?(dir, sha, existing)
+        @out.puts "#{repo}: release/#{version} already exists at #{existing} and contains dev #{sha}"
+        return Success(:ok)
+      end
+
+      Failure("#{repo} release/#{version} exists at #{existing}, which does not contain dev's cut sha #{sha} — " \
+              "a branch with that name predates the cut (e.g. a stale manual release branch); confirm it's " \
+              "stale with its owner, delete it, then re-dispatch")
+    rescue Github::CommandError => e
+      Failure("#{repo}: could not check the existing release/#{version} at #{existing}: #{e.message}")
     end
 
     # ensure_bump_pr: state: all — in reconcile mode the bump PR may

@@ -219,7 +219,9 @@ module Train
       Failure("release back-merge check failed for #{repo}: #{e.message}")
     end
 
-    # True only if a NON-bot commit on release/<version> is missing from dev.
+    # True only if a NON-bot commit on release/<version> is missing from dev
+    # AND was not already on main before this release merged (see the exclusion
+    # below — release branches contain main by construction now).
     # SHAs come from the GitHub API on `repo` (dev tip via ls_remote; release tip
     # via ls_remote, falling back to the merged PR's recorded head-sha when the
     # branch was already deleted on merge) — so the decision never depends on
@@ -251,8 +253,41 @@ module Train
       @gh.fetch(dir, dev_sha)
       @gh.fetch(dir, release_tip)
 
-      authors = @gh.commit_authors(dir, "#{dev_sha}..#{release_tip}")
+      # Since the cut builds release/<version> as a merge of dev AND main
+      # (Cut#ensure_release_branch), `dev..tip` also sweeps in every commit
+      # main carried that dev never absorbed — chiefly earlier releases' merge
+      # commits, authored by whoever pressed merge rather than by this tool's
+      # bot identity. Unfiltered, that would open a back-merge PR on every
+      # single release. Excluding what was already on main BEFORE this release
+      # merged leaves exactly the release branch's own line of work.
+      authors = @gh.commit_authors(dir, "#{dev_sha}..#{release_tip}",
+                                   exclude: main_before_release_merge(dir: dir, version: version))
       authors.any? { |email| email != Github::BOT_AUTHOR_EMAIL }
+    end
+
+    # main's tip as it stood immediately BEFORE this release merged: the FIRST
+    # parent of the release PR's merge commit, which `prepare` has already
+    # pushed as the v<version> tag (record always follows prepare, and the tag
+    # points at that merge commit by construction). Nothing else in the graph
+    # can recover it — by record time main has swallowed the release branch,
+    # so merge-base(main, tip) is the tip itself.
+    #
+    # nil (no exclusion — exactly the pre-2026-08 behavior) whenever the tag
+    # or its first parent can't be read: a manual `promote record` with no
+    # prepare, a version tagged before any of this existed, a checkout too
+    # shallow to hold the parent. That direction is deliberate: a spurious
+    # back-merge PR is noise a human closes, while a MISSED back-merge is the
+    # divergence this gate exists to prevent.
+    def main_before_release_merge(dir:, version:)
+      merge_sha = @gh.tag_sha(dir, Versions.tag(version))
+      return nil if merge_sha.to_s.empty?
+
+      @gh.fetch(dir, merge_sha)
+      @gh.rev_parse(dir, "#{merge_sha}^1")
+    rescue Github::CommandError => e
+      @out.puts "train: warning: could not resolve main as of the #{version} merge (#{e.message}) — " \
+                "the back-merge check runs unexcluded, which over-triggers rather than skipping"
+      nil
     end
 
     # The release branch tip on origin, or the merged PR's head-sha if the

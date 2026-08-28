@@ -22,6 +22,7 @@ store steps — App Store Connect / Play Console access.
 - [The normal week (no action required)](#the-normal-week-no-action-required)
 - [AI-drafted release notes (ConvosOS)](#ai-drafted-release-notes-convosos)
 - [Keeping a release branch in sync with dev](#keeping-a-release-branch-in-sync-with-dev)
+- [Why the release branch contains main](#why-the-release-branch-contains-main)
 - [Merging the train](#merging-the-train)
 - [Promotion (automatic; how to re-run)](#promotion-automatic-how-to-re-run)
 - [Hotfix: patching an already-released version](#hotfix-patching-an-already-released-version)
@@ -36,10 +37,13 @@ store steps — App Store Connect / Play Console access.
 ## The normal week (no action required)
 
 1. **Thursday 15:45 ET** — the `release-cut` workflow cuts `release/x.y.z`
-   from both repos' dev tips: manifest + seeded notes committed to
-   `releases/x.y.z/` first, then branches, version-bump PRs to dev
-   (auto-merged), and release PRs to main. The cut announces itself in
-   **#app** with links to the release PRs, the notes, and this runbook.
+   from both repos: manifest + seeded notes committed to `releases/x.y.z/`
+   first, then branches, version-bump PRs to dev (auto-merged), and release
+   PRs to main. Each branch is created as a single commit that **merges dev's
+   tip with main's tip** and re-asserts `x.y.z` in the version file (see "Why
+   the release branch contains main") — still one push, so still exactly one
+   RC. The cut announces itself in **#app** with links to the release PRs,
+   the notes, and this runbook.
 2. **Every push to `release/x.y.z`** uploads an RC (TestFlight / Play
    internal) and records its artifact identity in the manifest.
 3. **Humans edit notes** any time before merge: GitHub web pencil on
@@ -106,6 +110,42 @@ To check by hand from an app checkout:
 ```sh
 train check-branch-version --ref release/x.y.z    # --dir defaults to cwd
 ```
+
+## Why the release branch contains main
+
+`release/x.y.z` is cut as a merge of dev's tip **and main's tip**, with the
+version file re-asserted to `x.y.z` in that same commit. It is not dev's tip
+alone. That one structural choice is what stops the release PR from merging
+into main at the wrong version.
+
+Git merges compare **content against the merge base**, not commits. On
+2026-08-28 the base of main and `release/2.6.0` was a *dev* commit that
+already read 2.6.0; main had since changed that line to 2.5.0 (the 2.5.0
+release's restore commits, which reached main through that release's merge);
+`release/2.6.0` never touched it, so relative to the base it was *unchanged*.
+A three-way merge takes the side that changed — so the merge commit came out
+stamped **2.5.0** while the RC'd tip and the uploaded TestFlight build said
+2.6.0. No conflict, no signal. Promotion's tree check caught it before
+anything was tagged, but the release had to be repaired by hand.
+
+Because the branch now contains main, the base of the later
+`release/x.y.z` → main merge is **main's own tip**: main is unchanged, the
+release branch is the only side that changed the version line, and the merge
+can only resolve to `x.y.z`. Its tree is also exactly the RC'd tip's tree,
+which is the invariant promotion's `merge tree differs from RC'd branch tip`
+check exists to enforce. It re-establishes itself every week: later dev
+merges into the release branch only move the base along dev's line, and the
+next cut merges the new main in again.
+
+Two things follow for operators:
+
+- The release PR's commit list includes main's commits. That is expected; the
+  PR's diff against main is still just the release's own changes.
+- The cut also prints a `version drift` warning when
+  merge-base(main, dev) reads a different version than main — the shape that
+  armed the 2.6.0 incident. It is a diagnostic, not a failure: the merge above
+  is what defuses it. If you see it, read the release PR's merge commit before
+  pressing merge.
 
 ## Merging the train
 
@@ -225,7 +265,17 @@ The essential invariant: **manifest first, app repos second**.
    and the same with `--repo xmtplabs/convos-client > android.md`
    (`submission-notes.md` starts as a copy of android.md under a reviewer
    header). Commit + push to main.
-3. In each app repo: `git push origin <dev-sha>:refs/heads/release/x.y.z`.
+3. In each app repo, build the branch tip as a merge of dev and main — a
+   plain `dev-sha:refs/heads/release/x.y.z` push is what let 2.6.0 merge into
+   main stamped 2.5.0 (see "Why the release branch contains main"):
+
+   ```sh
+   git checkout --detach <dev-sha>
+   git merge --no-ff --no-commit origin/main    # conflicts? back-merge main into dev first
+   train bump-version bump . x.y.z              # re-assert the release's own version
+   git commit -am "train: cut release/x.y.z (merge main; version x.y.z)"
+   git push origin HEAD:refs/heads/release/x.y.z   # ONE push = ONE RC
+   ```
 4. Bump dev: branch `bot/bump-<next>` from the same SHA, apply
    `train bump-version bump <checkout> <next>`, commit, push, open a PR to
    dev and merge it.
@@ -365,13 +415,17 @@ re-dispatch with `force: true` to converge.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Cut fails: `manifest push ... failed (non-fast-forward? retry the cut)` | main ruleset rejected the push (actor not bypass-listed) or a real race with an append | Ensure `convos-conductor` is in the main ruleset's bypass list; workflow checkout must use `persist-credentials: false` (a persisted GITHUB_TOKEN header overrides the bot token). Races: just re-dispatch. |
-| `release/x.y.z exists at <sha>, expected <sha>` | a branch with that name predates the cut (e.g. a manual release branch) | Confirm it's stale with its owner, delete it, re-dispatch (reconcile completes the rest). |
+| `release/x.y.z exists at <sha>, which does not contain dev's cut sha <sha>` | a branch with that name predates the cut (e.g. a manual release branch). A branch the cut itself made, or one that has since advanced, contains dev's sha and converges silently — only a foreign one fails | Confirm it's stale with its owner, delete it, re-dispatch (reconcile completes the rest). |
+| Cut fails: `merging main (<sha>) into dev (<sha>) for release/x.y.z conflicted` | main moved between the cut's own mergeability probe and the branch build, or a back-merge was skipped so main carries content dev never absorbed | Nothing was pushed for that repo. True-merge main into dev (resolve there, never squash), then re-dispatch the cut. |
+| Cut fails: `could not build the release/x.y.z tip` / `could not re-assert version x.y.z` | git or the version file misbehaved while building the merge commit (unreadable version file, internally split declarations) | Nothing was pushed for that repo. Fix the version file on dev, then re-dispatch. |
+| Cut warns: `version drift — merge-base(main, dev) <sha> reads <x> but main reads <y>` | the shape that armed the 2.6.0 incident: main is the only side that changed the version line, so any merge based there resolves to main's version | Not a failure — cutting the branch as a merge of dev and main defuses it (see "Why the release branch contains main"). Before merging the release PR, confirm its merge commit reads the release's own version. |
+| Cut warns: `could not evaluate the merge-base version drift canary` | the canary couldn't read a version blob (unknown rev, unparseable file) | Diagnostic only; the cut is unaffected. Worth a look if it persists — it usually means the version file moved or split. |
 | Merge: `no RC recorded for tip <sha>` | the tip's RC upload is still running or failed | Wait for / re-run the RC upload, then comment the merge command again. |
 | Merge: `<user> lacks write on <repo>` | commenter lacks push access on one participating repo | Someone with write on BOTH repos comments instead. |
 | RC upload: `<branch> carries version <x>, but the branch claims <y>` | the release branch was advanced to `dev` (merge or fast-forward) after the post-cut bump landed, so it now carries dev's NEXT version | Reset the version file on the release branch to the branch's own version and push. Nothing was built or uploaded — `train check-branch-version` runs before the build precisely because a consumed versionCode/build number can never be reused. |
 | RC upload: `check-branch-version: inconsistent versions found` | the version file is internally split — the app's declarations disagree (the ShareExtension-stuck-at-2.0.0 class of drift). Identical duplicates are fine; only disagreement fails. | Make every declaration agree, then push. |
 | Promotion: `the RC at <sha> is version <x>, but <y> is being promoted` | same drift, reaching the last gate — the RC that was built and uploaded carries a version the train never recorded | Nothing was tagged. Fix the version file on the release branch, re-merge, and let a fresh RC build; the already-uploaded artifact is stamped `<x>` and cannot be promoted as `<y>`. |
-| Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
+| Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't. Also how the 2.6.0 version-drift merge surfaced, before release branches contained main | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. A branch cut by the current tool contains main, so its merge tree equals its own tip by construction — this now means a squash/rebase, or a branch built by hand. |
 | Promotion: `android release notes render to N chars (Play limit 500)` | android.md too long once rendered | Nothing was tagged or staged — the gate runs before any mutation. Pencil-edit `releases/x.y.z/android.md` on main to shorten (check the rendered length: `train` renders headers/bullets/links to plain text), then convos-client → Actions → "Promote Release" → Run workflow with the version. iOS promotion is independent and unaffected. |
 | Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |
 | Promotion run failed midway / never fired | transient error, or the caller workflows landed after the merge | Re-run the failed run, or Actions → "Promote Release" → dispatch with the version — everything converges. |

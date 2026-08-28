@@ -21,7 +21,12 @@ The weekly cut. Decides whether it is cut time (15:45 America/New_York on
 the `cut-day` from `release-config.yml`, minus `skip-dates`), recovers
 in-flight trains, captures one dev SHA per app repo, commits the manifest +
 seeded release notes first, then ensures per repo: `release/x.y.z` branch,
-version-bump PR to dev (auto-merge), release PR to main. Seeded notes cover
+version-bump PR to dev (auto-merge), release PR to main. The branch is one
+commit merging dev's tip with main's tip, version re-asserted to `x.y.z` —
+containing main is what pins the later release→main merge's base to main's
+own tip, so that merge cannot resolve the version line to main's older value
+(the 2.6.0 incident; RUNBOOK, "Why the release branch contains main").
+Seeded notes cover
 PRs merged to dev since the previous train's cut date (from the manifests;
 7-day window only for the first-ever cut).
 

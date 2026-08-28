@@ -68,6 +68,44 @@ class FakeGithub
     @rev_parses[[dir_suffix, ref]] = sha
   end
 
+  # stub_rev_parse_sequence: successive rev_parse calls for this clone+ref
+  # return the listed shas in order (the last one repeats). The cut resolves
+  # HEAD twice against the same clone — dev's tip when it captures the repo,
+  # then the merge tip it just built — and a test that cares about the
+  # difference between "what dev was" and "what got pushed" needs the two to
+  # differ, which a single canned answer cannot express.
+  def stub_rev_parse_sequence(dir_suffix, ref, shas)
+    (@rev_parse_sequences ||= {})[[dir_suffix, ref]] = shas.dup
+  end
+
+  # stub_merge_base: scripts merge_base(dir, ...) for this clone; unstubbed
+  # clones get a deterministic "merge-base-<clone>".
+  def stub_merge_base(dir_suffix, sha)
+    (@merge_bases ||= {})[dir_suffix] = sha
+  end
+
+  # stub_merge_content: a writer applied to the worktree whenever
+  # merge_no_commit lands on this clone — the fake runs no git, so a test that
+  # cares WHAT the merge brought in (main's older version file, say) writes it
+  # here.
+  def stub_merge_content(dir_suffix, &writer)
+    (@merge_contents ||= {})[dir_suffix] = writer
+  end
+
+  # fail_merge_no_commit: merge_no_commit reports conflicts for this clone —
+  # the verdict, not an operational git failure.
+  def fail_merge_no_commit(dir_suffix)
+    (@merge_no_commit_failures ||= {})[dir_suffix] = true
+  end
+
+  # on_commit: a callback run with (dir, message) at each commit(). The fake
+  # has no real git, so a file rewrite that happens between a checkout and its
+  # commit (the cut re-asserting the release version onto the merge) leaves no
+  # other trace for a test to assert on.
+  def on_commit(&block)
+    @on_commit = block
+  end
+
   # Blob content at a revision. Unstubbed refs raise CommandError, matching
   # real `git show` on an unknown rev/path — the fail-closed path matters as
   # much as the happy one here.
@@ -76,9 +114,13 @@ class FakeGithub
     @show_files[[dir_suffix, sha, path]] = content
   end
 
-  def stub_commit_authors(dir_suffix, range, authors)
+  # stub_commit_authors: keyed on the range AND the negative revision the
+  # caller excludes, because "which commits count" is exactly what the
+  # back-merge gate's exclusion changes — a stub that ignored `exclude` would
+  # answer the same for both and prove nothing.
+  def stub_commit_authors(dir_suffix, range, authors, exclude: nil)
     @commit_authors ||= {}
-    @commit_authors[[dir_suffix, range]] = authors
+    @commit_authors[[dir_suffix, range, exclude]] = authors
   end
 
   def fail_commit_authors(dir_suffix, message: "simulated log failure")
@@ -194,7 +236,34 @@ class FakeGithub
   def rev_parse(dir, ref = "HEAD")
     record(:rev_parse, [dir, ref])
     @rev_parses ||= {}
+    seq = (@rev_parse_sequences || {})[[suffix(dir), ref]]
+    return seq.size > 1 ? seq.shift : seq.first if seq && !seq.empty?
+
     @rev_parses[[suffix(dir), ref]] || @rev_parses[suffix(dir)] || "sha-#{suffix(dir)}"
+  end
+
+  # merge_base: read-only, always executes; defaults to a deterministic
+  # "merge-base-<clone>" so tests that don't exercise the drift canary still
+  # get a stable sha to stub blobs at.
+  def merge_base(dir, ours, theirs)
+    record(:merge_base, [dir, ours, theirs])
+    (@merge_bases || {})[suffix(dir)] || "merge-base-#{suffix(dir)}"
+  end
+
+  # merge_no_commit: defaults to a clean merge (true), applying any
+  # stub_merge_content writer to model what the merge landed in the worktree.
+  # fail_merge_no_commit scripts the conflict verdict (false).
+  def merge_no_commit(dir, ref)
+    record(:merge_no_commit, [dir, ref])
+    return false if (@merge_no_commit_failures || {})[suffix(dir)]
+
+    (@merge_contents || {})[suffix(dir)]&.call(dir)
+    true
+  end
+
+  def merge_abort(dir)
+    record(:merge_abort, [dir])
+    nil
   end
 
   def show_file(dir, sha, path)
@@ -210,14 +279,14 @@ class FakeGithub
     content
   end
 
-  def commit_authors(dir, range)
-    record(:commit_authors, [dir, range])
+  def commit_authors(dir, range, exclude: nil)
+    record(:commit_authors, [dir, range], { exclude: exclude })
     if (msg = (@commit_authors_failures ||= {})[suffix(dir)])
       raise ::Train::Github::CommandError.new(
         ["git", "-C", dir, "log", "--format=%ae", range], stdout: "", stderr: msg, status: fake_failed_status
       )
     end
-    (@commit_authors || {})[[suffix(dir), range]] || []
+    (@commit_authors || {})[[suffix(dir), range, exclude]] || []
   end
 
   # Unstubbed -> "" (the promote guard treats an empty/mismatched origin as a
@@ -359,6 +428,7 @@ class FakeGithub
       )
     end
 
+    @on_commit&.call(dir, message)
     true
   end
 
