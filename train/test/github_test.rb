@@ -701,34 +701,68 @@ class GithubTest < Minitest::Test
     gh.define_singleton_method(:clone) { |_url, dest, **| dest }
   end
 
-  def test_with_releases_clone_yields_dir_returns_block_value_and_cleans_up
-    gh = Train::Github.new
-    stub_clone_noop(gh)
-    seen = nil
+  # releases_clone_url now refuses a blank GH_TOKEN, so these lifecycle tests
+  # have to supply one; they never reach the network (clone is stubbed).
+  def with_gh_token(value = "test-token")
+    previous = ENV["GH_TOKEN"]
+    ENV["GH_TOKEN"] = value
+    yield
+  ensure
+    previous.nil? ? ENV.delete("GH_TOKEN") : ENV["GH_TOKEN"] = previous
+  end
 
-    result = gh.with_releases_clone("test-clone-") do |dir|
-      seen = dir
-      assert Dir.exist?(dir)
-      :block_value
+  # ---- releases_clone_url: fail loud rather than half-credentialed ----
+
+  # convos-releases is public, so a tokenless URL clones and only fails at the
+  # push — which StateWriter reports as "push contention?" after three
+  # retries. Refusing up front is the difference between a clear error and a
+  # misdiagnosis (hit twice during the 2.6.0 promotion).
+  def test_releases_clone_url_refuses_a_blank_token
+    with_gh_token("") do
+      error = assert_raises(Train::Github::ApiError) { Train::Github.new.releases_clone_url }
+      assert_match(/GH_TOKEN is empty/, error.message)
+      assert_match(/gh auth token/, error.message)
     end
+  end
 
-    assert_equal :block_value, result
-    refute Dir.exist?(seen), "tmpdir must be removed after the block"
+  def test_releases_clone_url_embeds_the_token
+    with_gh_token("tok-123") do
+      assert_includes Train::Github.new.releases_clone_url, "x-access-token:tok-123@"
+    end
+  end
+
+  def test_with_releases_clone_yields_dir_returns_block_value_and_cleans_up
+    with_gh_token do
+      gh = Train::Github.new
+      stub_clone_noop(gh)
+      seen = nil
+
+      result = gh.with_releases_clone("test-clone-") do |dir|
+        seen = dir
+        assert Dir.exist?(dir)
+        :block_value
+      end
+
+      assert_equal :block_value, result
+      refute Dir.exist?(seen), "tmpdir must be removed after the block"
+    end
   end
 
   def test_with_releases_clone_cleans_up_when_the_block_raises
-    gh = Train::Github.new
-    stub_clone_noop(gh)
-    seen = nil
+    with_gh_token do
+      gh = Train::Github.new
+      stub_clone_noop(gh)
+      seen = nil
 
-    assert_raises(RuntimeError) do
-      gh.with_releases_clone("test-clone-") do |dir|
-        seen = dir
-        raise "boom"
+      assert_raises(RuntimeError) do
+        gh.with_releases_clone("test-clone-") do |dir|
+          seen = dir
+          raise "boom"
+        end
       end
-    end
 
-    refute Dir.exist?(seen), "tmpdir must be removed even when the block raises"
+      refute Dir.exist?(seen), "tmpdir must be removed even when the block raises"
+    end
   end
 
   # ---- pr_merge ----

@@ -269,16 +269,50 @@ GH_TOKEN=$(gh auth token) nix develop --command train promote prepare \
   --merge-sha <release PR merge commit> --head-sha <release branch tip>
 ```
 
-- **Play**: Play Console → org.convos.android → Internal testing →
-  promote the recorded versionCode to Production as a DRAFT → paste
-  `.train-promote/android.store.txt` (the ≤500-char rendering prepare
-  staged).
-- **App Store**: App Store Connect → new App Store version x.y.z → attach
-  the recorded TestFlight build number → paste `.train-promote/ios.store.txt`
-  + reviewer notes from `.train-promote/submission.store.txt`.
-- Record it (run where prepare ran — the GitHub Release body reads the
-  notes prepare staged; also opens the hotfix back-merge PR when the
-  manifest is hotfix-kind):
+- **Stage the store metadata with the SAME lanes the workflow runs** — the
+  usual failure is that promotion never fired or aborted midway, while
+  fastlane is perfectly fine. Hand-pasting is the last resort, for when
+  fastlane itself is broken. From the app checkout, in its dev shell:
+
+```sh
+# iOS — needs the App Store Connect key trio. Runs from the checkout root
+# (convos-ios keeps its Fastfile at fastlane/, and the workflow sets no
+# working-directory):
+TRAIN_VERSION=x.y.z TRAIN_BUILD_NUMBER=<recorded build> \
+TRAIN_NOTES_DIR="$PWD/.train-promote" fastlane stage_appstore
+# Android — needs PLAY_SERVICE_ACCOUNT_JSON_PATH. Two differences from
+# iOS, both mirroring what android-play-promote.yml does: the `android`
+# platform prefix (stage_play lives under `platform :android`, and there is
+# no default_platform, so a bare `fastlane stage_play` will not resolve),
+# and it runs from `android/` because the Fastfile is at android/fastlane/.
+# TRAIN_NOTES_DIR must still point at the CHECKOUT ROOT's .train-promote —
+# that is where prepare wrote it — so capture it BEFORE cd'ing, or it
+# resolves to the nonexistent android/.train-promote.
+NOTES="$PWD/.train-promote"
+(cd android && TRAIN_VERSION_CODE=<recorded code> \
+  TRAIN_NOTES_DIR="$NOTES" fastlane android stage_play)
+```
+
+  `TRAIN_NOTES_DIR` is `<app checkout>/.train-promote`, NOT
+  `convos-releases/releases/x.y.z`. The lanes read the RENDERED
+  `ios.store.txt` / `android.store.txt` / `submission.store.txt` twins that
+  `prepare` writes there; the `releases/` dir holds only the authored
+  markdown, so pointing at it aborts with "rendered notes missing".
+- Both lanes leave the release UNSUBMITTED, same as a normal week.
+- Only if fastlane is unusable, paste by hand: Play Console → Internal
+  testing → promote the recorded versionCode to Production as a DRAFT;
+  App Store Connect → new version x.y.z → attach the recorded build →
+  paste the same rendered files.
+- Record it. **Run it in the app checkout where prepare ran** — `--app-dir`
+  defaults to the cwd, and the GitHub Release body is read from
+  `<app-dir>/.train-promote/<platform>.md`. Run it from convos-releases by
+  mistake and the ledger still writes correctly, but the Release is created
+  with an EMPTY body and a re-run will not fix it (`ensure_release` returns
+  early when the release exists) — repair it with
+  `gh release edit vx.y.z -R <repo> --notes-file .train-promote/<platform>.md`
+  from that app checkout (`releases/x.y.z/` lives in convos-releases, not here).
+  This step also opens the hotfix back-merge PR when the manifest is
+  hotfix-kind:
 
 ```sh
 GH_TOKEN=$(gh auth token) nix develop --command train promote record \
@@ -371,6 +405,8 @@ re-dispatch with `force: true` to converge.
 | RC upload: `<branch> carries version <x>, but the branch claims <y>` | the release branch was advanced to `dev` (merge or fast-forward) after the post-cut bump landed, so it now carries dev's NEXT version | Reset the version file on the release branch to the branch's own version and push. Nothing was built or uploaded — `train check-branch-version` runs before the build precisely because a consumed versionCode/build number can never be reused. |
 | RC upload: `check-branch-version: inconsistent versions found` | the version file is internally split — the app's declarations disagree (the ShareExtension-stuck-at-2.0.0 class of drift). Identical duplicates are fine; only disagreement fails. | Make every declaration agree, then push. |
 | Promotion: `the RC at <sha> is version <x>, but <y> is being promoted` | same drift, reaching the last gate — the RC that was built and uploaded carries a version the train never recorded | Nothing was tagged. Fix the version file on the release branch, re-merge, and let a fresh RC build; the already-uploaded artifact is stamped `<x>` and cannot be promoted as `<y>`. |
+| Promotion: `the merge commit <sha> is stamped version <x>, but the RC'd tip <sha> is <y>` | the target branch carried a version change relative to the merge base and the release branch never touched the line, so the three-way merge silently took the target's side. convos-ios 2.6.0: main held 2.5.0 from the previous release's restore commits, the merge base (on dev) was already 2.6.0, and the merge re-stamped the release to 2.5.0. | Nothing was tagged. Restore the release version on the merged result, confirm `tree(main tip) == tree(RC'd tip)`, then complete promotion with `prepare --merge-sha <corrected tip>`. Note `release/x.y.z` is usually deleted on merge and the "Reserve release/hotfix branches (train only)" ruleset stops you recreating it — fix forward on the target branch instead. |
+| `state write failed after 3 attempts (push contention?)` | usually NOT contention: `GH_TOKEN` empty or not a token, so the public convos-releases clone succeeds and only the push fails. (`gh auth login` prints the device-flow UI, it does not emit a token.) | `GH_TOKEN=$(gh auth token) train …`. Newer builds refuse a blank token up front instead of retrying. |
 | Promotion: `merge tree differs from RC'd branch tip` | squash/rebase merge, or main had commits dev didn't | Merge trains with a MERGE COMMIT; reconcile main→dev before merging. |
 | Promotion: `android release notes render to N chars (Play limit 500)` | android.md too long once rendered | Nothing was tagged or staged — the gate runs before any mutation. Pencil-edit `releases/x.y.z/android.md` on main to shorten (check the rendered length: `train` renders headers/bullets/links to plain text), then convos-client → Actions → "Promote Release" → Run workflow with the version. iOS promotion is independent and unaffected. |
 | Promotion: `still contains the seeded placeholder` | hotfix notes never edited | Pencil-edit `releases/x.y.z/*.md` on main, re-run promotion (dispatch with the version). |
